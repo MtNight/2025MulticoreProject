@@ -30,6 +30,9 @@
     <ClCompile Include="comparator.c">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="ViT_prl.c">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="comparator.h">
@@ -44,5 +47,13 @@
     <ClInclude Include="ViT_seq.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="ViT_prl.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="kernel_MHA.cl">
+      <Filter>소스 파일</Filter>
+    </None>
   </ItemGroup>
 </Project>

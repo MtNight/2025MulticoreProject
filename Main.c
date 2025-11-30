@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 #include "Network.h"
-#include "ViT_seq.h"
+//#include "ViT_seq.h"
+#include "ViT_prl.h"
 #include "comparator.h"
 #include <time.h>
 #include <math.h>
@@ -45,9 +46,8 @@ int main() {
 
     printf("=====================Start========================\n");
     start = clock();
-    // Input here - 병렬처리 함수 작성
-    ViT_seq(images, network, probabilities);
-    //
+    //ViT_seq(images, network, probabilities);
+    ViT_prl(images, network, probabilities);
     end = clock();
     printf("Elapsed time: %.2f sec\n", (double)(end - start) / CLK_TCK);
 

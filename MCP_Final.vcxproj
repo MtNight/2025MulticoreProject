@@ -146,13 +146,18 @@
     <ClCompile Include="dirent.c" />
     <ClCompile Include="Main.c" />
     <ClCompile Include="Network.c" />
+    <ClCompile Include="ViT_prl.c" />
     <ClCompile Include="ViT_seq.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="comparator.h" />
     <ClInclude Include="dirent.h" />
     <ClInclude Include="Network.h" />
+    <ClInclude Include="ViT_prl.h" />
     <ClInclude Include="ViT_seq.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="kernel_MHA.cl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
