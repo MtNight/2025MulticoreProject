@@ -16,11 +16,11 @@ __kernel void gemm(
 __kernel void transpose(
     __global float* src,
     __global float* dst,
-    int rows, int cols) {
+    int row, int col) {
     int r = get_global_id(0);
     int c = get_global_id(1);
 
-    dst[c * rows + r] = src[r * cols + c];
+    dst[c * row + r] = src[r * col + c];
 }
 __kernel void add_bias(	
 	__global float* M,
@@ -43,3 +43,52 @@ __kernel void divide_head(
     int offset = head_idx * head_dim;
     dst[t * head_dim + d] = src[t * embed_dim + offset + d];
 }
+__kernel void scale(
+    __global float* src,
+    float scaler) {
+    int i = get_global_id(0);
+    int j = get_global_id(1);
+
+    src[i * get_global_size(0) + j] /= sqrt(scaler);
+}
+__kernel void softmax_score(
+    __global float* src,
+    __local float* tmp) {
+    int i = get_global_id(0);
+    int j = get_global_id(1);
+    int tokens = get_global_size(0);
+
+    // 로컬 값 대입
+    tmp[j] = src[i * tokens + j];
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 맥스 구하기
+	for (int p = get_local_size(1) / 2; p >= 1; p = p >> 1) {		
+        if (j < p && tmp[j] < tmp[j + p]) tmp[j] = tmp[j + p];				
+		barrier(CLK_LOCAL_MEM_FENCE);					
+	}	
+    float max = tmp[0];
+	barrier(CLK_LOCAL_MEM_FENCE);
+    
+    // exp 대입
+    tmp[j] = exp(src[i * tokens + j] - max);
+	barrier(CLK_LOCAL_MEM_FENCE);
+    
+    // exp 합 구하기
+	for (int p = get_local_size(1) / 2; p >= 1; p = p >> 1) {		
+        if (j < p) tmp[j] = tmp[j] += tmp[j + p];				
+		barrier(CLK_LOCAL_MEM_FENCE);					
+	}	
+    float sum = tmp[0];
+	barrier(CLK_LOCAL_MEM_FENCE);
+
+    // exp합으로 나눠서 최종값 도출
+    src[i * tokens + j] = exp(src[i * tokens + j] - max) / sum;
+}
+/*
+각 i에 대해서
+맥스값 구하기
+exp(원본값-맥스) 대입
+exp의 합 구하기
+exp합으로 나누기
+*/

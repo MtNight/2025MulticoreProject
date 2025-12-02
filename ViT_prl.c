@@ -348,20 +348,30 @@ void multihead_attn(float* input, float* output, Network in_weight, Network in_b
         err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, score_global_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
 
-        //for test
-        // attn_score 저장 공간
-        float* scores = (float*)malloc(sizeof(float) * tokens * tokens);
-        err = clEnqueueReadBuffer(queue, scoreBuffer, CL_TRUE, 0, sizeof(float) * tokens * tokens, scores, 0, NULL, NULL);
+        // 스코어 스케일링
+        cl_kernel kernel_scale = clCreateKernel(program, "scale", &err);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_scale, 0, sizeof(cl_mem), &scoreBuffer);
+        CHECK_ERROR(err);
+        float hd = head_dim;
+        err = clSetKernelArg(kernel_scale, 1, sizeof(float), &hd);
+        CHECK_ERROR(err);
+        err = clEnqueueNDRangeKernel(queue, kernel_scale, 2, NULL, score_global_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
 
-        for (int i = 0; i < tokens; i++) {
-            for (int j = 0; j < tokens; j++) {
-                scores[i * tokens + j] /= sqrtf((float)head_dim);
-            }
-        }
-
         // softmax 적용
-        for (int i = 0; i < tokens; i++) {
+        printf("%d\n", tokens);
+        cl_kernel kernel_softmax = clCreateKernel(program, "softmax_score", &err);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_softmax, 0, sizeof(cl_mem), &scoreBuffer);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_softmax, 1, sizeof(float) * tokens, NULL);
+        CHECK_ERROR(err);
+        size_t softmax_local_size[2] = { 1, tokens };
+        err = clEnqueueNDRangeKernel(queue, kernel_softmax, 2, NULL, score_global_size, softmax_local_size, 0, NULL, NULL);
+        CHECK_ERROR(err);
+
+        /*for (int i = 0; i < tokens; i++) {
             float max_val = scores[i * tokens];
             for (int j = 1; j < tokens; j++) {
                 if (scores[i * tokens + j] > max_val) max_val = scores[i * tokens + j];
@@ -371,10 +381,17 @@ void multihead_attn(float* input, float* output, Network in_weight, Network in_b
                 scores[i * tokens + j] = expf(scores[i * tokens + j] - max_val);
                 sum_exp += scores[i * tokens + j];
             }
+
             for (int j = 0; j < tokens; j++) {
                 scores[i * tokens + j] /= sum_exp;
             }
-        }
+        }*/
+
+        //for test
+        // attn_score 저장 공간
+        float* scores = (float*)malloc(sizeof(float) * tokens * tokens);
+        err = clEnqueueReadBuffer(queue, scoreBuffer, CL_TRUE, 0, sizeof(float) * tokens * tokens, scores, 0, NULL, NULL);
+        CHECK_ERROR(err);
 
         // scores와 V를 곱해 head output 계산
         float* head_out = (float*)malloc(sizeof(float) * tokens * head_dim);
