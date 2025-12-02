@@ -1,4 +1,4 @@
-#pragma warning(disable : 4996)
+ï»¿#pragma warning(disable : 4996)
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -19,6 +19,7 @@
 #define attn_dropout 0.0
 #define drop_path_rate 0.0
 #define eps 1e-6
+#define TILE_SIZE 16
 
 #define CHECK_ERROR(err) \
     if (err != CL_SUCCESS) { \
@@ -26,6 +27,7 @@
         exit(EXIT_FAILURE); \
     }
 
+// OpenCL ì„¤ì • ê´€ë ¨ ë³€ìˆ˜ë“¤
 cl_int err;
 cl_platform_id platform;
 cl_device_id device;
@@ -38,6 +40,21 @@ cl_queue_properties props[] = {
 size_t kernel_source_size;
 char* sources[3];
 cl_program program;
+
+// MHAì— í•„ìš”í•œ ì»¤ë„
+cl_kernel kernel_transpose;
+cl_kernel kernel_gemm;
+cl_kernel kernel_add_bias;
+cl_kernel kernel_divide;
+cl_kernel kernel_scale;
+cl_kernel kernel_softmax;
+cl_kernel kernel_concat;
+// MHAì— í•„ìš”í•œ ë²„í¼
+cl_mem inputBuffer, outputBuffer;
+int encoder_count = 0;
+cl_mem qkvBuffer[3], inWeightBuffer[12][3], transposedInWeightBuffer[3], inBiasBuffer[12][3], dividedQkvBuffer[3];
+cl_mem transposedKeyBuffer, scoreBuffer, headOutputBuffer, attnOutputBuffer;
+cl_mem outWeightBuffer[12], transposedOutWeightBuffer, outBiasBuffer[12];
 
 clock_t startTime, endTime, ecnTime, mhaTime, mlpTime;
 
@@ -113,14 +130,14 @@ void flatten_transpose(float* input, float* output) {
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
 
-    // °¢ °ø°£ À§Ä¡(oh, ow)¸¦ ÇÏ³ªÀÇ ÆĞÄ¡·Î Ãë±ŞÇÏ¿© patch index °è»ê
+    // ê° ê³µê°„ ìœ„ì¹˜(oh, ow)ë¥¼ í•˜ë‚˜ì˜ íŒ¨ì¹˜ë¡œ ì·¨ê¸‰í•˜ì—¬ patch index ê³„ì‚°
     for (int oh = 0; oh < output_size; oh++) {
         for (int ow = 0; ow < output_size; ow++) {
             int patch_idx = oh * output_size + ow;
             for (int oc = 0; oc < embed_dim; oc++) {
-                // ±âÁ¸ ÀÔ·ÂÀº (oc, oh, ow)
+                // ê¸°ì¡´ ì…ë ¥ì€ (oc, oh, ow)
                 int idx_input = (oc * output_size + oh) * output_size + ow;
-                // ¿øÇÏ´Â Ãâ·ÂÀº (patch_idx, oc)
+                // ì›í•˜ëŠ” ì¶œë ¥ì€ (patch_idx, oc)
                 int idx_output = patch_idx * embed_dim + oc;
                 output[idx_output] = input[idx_input];
                 //printf("%f ",output[idx_output]);
@@ -130,17 +147,17 @@ void flatten_transpose(float* input, float* output) {
 }
 
 void class_token(float* patch_tokens, float* final_tokens, Network cls_tk) {
-    // ÀÌ¹ÌÁöÀÇ ÆĞÄ¡ ¼ö °è»ê: output_size = img_size / patch_size, num_patches = output_size^2
+    // ì´ë¯¸ì§€ì˜ íŒ¨ì¹˜ ìˆ˜ ê³„ì‚°: output_size = img_size / patch_size, num_patches = output_size^2
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
 
-    // 1. Ã¹ ¹øÂ° ÅäÅ«¿¡ class token º¹»ç (networks[0].data¿¡ ÀúÀåµÊ, embed_dim ±æÀÌ)
+    // 1. ì²« ë²ˆì§¸ í† í°ì— class token ë³µì‚¬ (networks[0].dataì— ì €ì¥ë¨, embed_dim ê¸¸ì´)
     for (int j = 0; j < embed_dim; j++) {
         final_tokens[j] = cls_tk.data[j];
     }
 
-    // 2. ÀÌÈÄ patch_tokens¸¦ ÀÌ¾îºÙÀÓ
-    // final_tokensÀÇ ÀÎµ¦½º embed_dimºÎÅÍ, patch_tokens ÀüÃ¼(embed_dim * num_patches) º¹»ç
+    // 2. ì´í›„ patch_tokensë¥¼ ì´ì–´ë¶™ì„
+    // final_tokensì˜ ì¸ë±ìŠ¤ embed_dimë¶€í„°, patch_tokens ì „ì²´(embed_dim * num_patches) ë³µì‚¬
     memcpy(final_tokens + embed_dim, patch_tokens, sizeof(float) * embed_dim * num_patches);
 
     int total_tokens = num_patches + 1; // class token + patch tokens
@@ -151,7 +168,7 @@ void class_token(float* patch_tokens, float* final_tokens, Network cls_tk) {
 }
 
 void pos_emb(float* input, float* output, Network pos_emb) {
-    // output_size: ÇÑ º¯ÀÇ ÆĞÄ¡ ¼ö, num_patches: ÀüÃ¼ ÆĞÄ¡ ¼ö, total_tokens: class token + patch tokens
+    // output_size: í•œ ë³€ì˜ íŒ¨ì¹˜ ìˆ˜, num_patches: ì „ì²´ íŒ¨ì¹˜ ìˆ˜, total_tokens: class token + patch tokens
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
     int total_tokens = num_patches + 1;
@@ -181,157 +198,107 @@ void layer_norm(float* input, float* output, Network weight, Network bias) {
     }
 }
 
-void multihead_attn(float* input, float* output, Network in_weight, Network in_bias, Network out_weight, Network out_bias) {
-    // ±â±â ¼¼ÆÃ
+void multihead_attn(float* input, float* output) {
 
+    // MHA ê³„ì‚°ì— í•„ìš”í•œ ë³€ìˆ˜ë“¤
     int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
-    float* Q = (float*)malloc(sizeof(float) * tokens * embed_dim);
-    float* K = (float*)malloc(sizeof(float) * tokens * embed_dim);
-    float* V = (float*)malloc(sizeof(float) * tokens * embed_dim);
+    int embedDim = embed_dim;
+    int head_dim = embed_dim / num_heads;
+    float hd_float = head_dim;  // float head_dim for scaling
+    int padding = 256;  // padded tokens for softmax
 
-    // ¹öÆÛ »ı¼º
-    cl_mem inputBuffer, qkvBuffer[3], inWeightBuffer[3], transposedInWeightBuffer[3], inBiasBuffer[3];
-    inputBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * tokens * embed_dim, NULL, &err);
+    // ê³„ì‚° ì‚¬ì´ì¦ˆ ì •ì˜
+    size_t weight_traspose_size[2] = { embedDim, embedDim };
+    size_t weight_size[2] = { embedDim, tokens };
+    //size_t weight_size_padded[2] = { 768, 224 };  //embedDim, tokens_padded 
+    size_t head_size[2] = { tokens, head_dim }; 
+    size_t rev_head_size[2] = { head_dim, tokens };
+    size_t score_size[2] = { tokens, tokens }; 
+    //size_t score_size_padded[2] = { 224 , 224 };
+    size_t softmax_local_size[2] = { 1, tokens }; 
+    //size_t gemm_local_size[2] = { TILE_SIZE, TILE_SIZE };     //tiling?
+
+    // input ì „ì†¡
+    err = clEnqueueWriteBuffer(queue, inputBuffer, CL_TRUE, 0, sizeof(float) * tokens * embedDim, input, 0, NULL, NULL);
     CHECK_ERROR(err);
 
     for (int i = 0; i < 3; i++) {
-        qkvBuffer[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
+        // in_weight ì „ì¹˜ - gemm ê³„ì‚°ì„ ìœ„í•œ ì „ì²˜ë¦¬
+        err = clSetKernelArg(kernel_transpose, 0, sizeof(cl_mem), &inWeightBuffer[encoder_count][i]);
         CHECK_ERROR(err);
-        inWeightBuffer[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+        err = clSetKernelArg(kernel_transpose, 1, sizeof(cl_mem), &transposedInWeightBuffer[i]);
         CHECK_ERROR(err);
-        transposedInWeightBuffer[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+        err = clSetKernelArg(kernel_transpose, 2, sizeof(int), &embedDim);
         CHECK_ERROR(err);
-        inBiasBuffer[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
+        err = clSetKernelArg(kernel_transpose, 3, sizeof(int), &embedDim);
         CHECK_ERROR(err);
-    }
-
-    // ¹öÆÛ¿¡ ¸Ş¸ğ¸® Àü¼Û
-    // input Àü¼Û
-    err = clEnqueueWriteBuffer(queue, inputBuffer, CL_TRUE, 0, sizeof(float) * tokens * embed_dim, input, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
-    cl_kernel kernel_transpose = clCreateKernel(program, "transpose", &err);
-    int ed = embed_dim;
-    size_t trans_size[2] = { embed_dim, embed_dim };
-    for (int i = 0; i < 3; i++) {
-        // in_weight Àü¼Û
-        err = clEnqueueWriteBuffer(queue, inWeightBuffer[i], CL_TRUE, 0, sizeof(float) * embed_dim * embed_dim, (in_weight.data + i * embed_dim * embed_dim), 0, NULL, NULL);
-        CHECK_ERROR(err);
-        // in_weight ÀüÄ¡ - gemm °è»êÀ» À§ÇÑ ÀüÃ³¸®
-        clSetKernelArg(kernel_transpose, 0, sizeof(cl_mem), &inWeightBuffer[i]);
-        CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 1, sizeof(cl_mem), &transposedInWeightBuffer[i]);
-        CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 2, sizeof(int), &ed);
-        CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 3, sizeof(int), &ed);
-        CHECK_ERROR(err);
-        err = clEnqueueNDRangeKernel(queue, kernel_transpose, 2, NULL, trans_size, NULL, 0, NULL, NULL);
-        CHECK_ERROR(err);
-        // in_bias Àü¼Û
-        err = clEnqueueWriteBuffer(queue, inBiasBuffer[i], CL_TRUE, 0, sizeof(float) * embed_dim, (in_bias.data + i * embed_dim), 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, kernel_transpose, 2, NULL, weight_traspose_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
     }
-    clFinish(queue);
-    for (int i = 0; i < 3; i++) clReleaseMemObject(inWeightBuffer[i]);
 
     // Set QKV (Excute gemm)
-    cl_kernel kernel_gemm = clCreateKernel(program, "gemm", &err);
-    CHECK_ERROR(err);
     err = clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &inputBuffer);
     CHECK_ERROR(err);
     err = clSetKernelArg(kernel_gemm, 3, sizeof(int), &tokens);
     CHECK_ERROR(err);
-    err = clSetKernelArg(kernel_gemm, 4, sizeof(int), &ed);
+    err = clSetKernelArg(kernel_gemm, 4, sizeof(int), &embedDim);
     CHECK_ERROR(err);
-    err = clSetKernelArg(kernel_gemm, 5, sizeof(int), &ed);
+    err = clSetKernelArg(kernel_gemm, 5, sizeof(int), &embedDim);
     CHECK_ERROR(err);
-    size_t weight_global_size[2] = { embed_dim, tokens };
 
     for (int i = 0; i < 3; i++) {
         err = clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &transposedInWeightBuffer[i]);
         CHECK_ERROR(err);
         err = clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &qkvBuffer[i]);
         CHECK_ERROR(err);
-        err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, weight_global_size, NULL, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, weight_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
     }
 
     // Excute add_bias
-    cl_kernel kernel_add = clCreateKernel(program, "add_bias", &err);
-    CHECK_ERROR(err);
-    err = clSetKernelArg(kernel_add, 2, sizeof(int), &ed);
+    err = clSetKernelArg(kernel_add_bias, 2, sizeof(int), &embedDim);
     CHECK_ERROR(err);
 
     for (int i = 0; i < 3; i++) {
-        err = clSetKernelArg(kernel_add, 0, sizeof(cl_mem), &qkvBuffer[i]);
+        err = clSetKernelArg(kernel_add_bias, 0, sizeof(cl_mem), &qkvBuffer[i]);
         CHECK_ERROR(err);
-        err = clSetKernelArg(kernel_add, 1, sizeof(cl_mem), &inBiasBuffer[i]);
+        err = clSetKernelArg(kernel_add_bias, 1, sizeof(cl_mem), &inBiasBuffer[encoder_count][i]);
         CHECK_ERROR(err);
-        err = clEnqueueNDRangeKernel(queue, kernel_add, 2, NULL, weight_global_size, NULL, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, kernel_add_bias, 2, NULL, weight_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
     }
 
-    clFinish(queue);
-    for (int i = 0; i < 3; i++) clReleaseMemObject(transposedInWeightBuffer[i]);
-    for (int i = 0; i < 3; i++) clReleaseMemObject(inBiasBuffer[i]);
-
-    //for test
-    err = clEnqueueReadBuffer(queue, qkvBuffer[0], CL_TRUE, 0, sizeof(float) * tokens * embed_dim, Q, 0, NULL, NULL);
-    err = clEnqueueReadBuffer(queue, qkvBuffer[1], CL_TRUE, 0, sizeof(float) * tokens * embed_dim, K, 0, NULL, NULL);
-    err = clEnqueueReadBuffer(queue, qkvBuffer[2], CL_TRUE, 0, sizeof(float) * tokens * embed_dim, V, 0, NULL, NULL);
-
-    int head_dim = embed_dim / num_heads;   //group size
-
-    /*Attn °á°ú¸¦ ÀúÀåÇÒ ¹öÆÛ*/
-    float* attn_output = (float*)malloc(sizeof(float) * tokens * embed_dim);
-    for (int i = 0; i < tokens * embed_dim; i++) attn_output[i] = 0.0f;
-
-
-    /*headº°·Î attn ¼öÇà*/
-    cl_kernel kernel_divide = clCreateKernel(program, "divide_head", &err);
-    size_t head_size[2] = { tokens, head_dim };
+    /*headë³„ë¡œ attn ìˆ˜í–‰*/
     for (int h = 0; h < num_heads; h++) {
-        int head_offset = h * head_dim; //group id?
-
-        // Çìµå ºĞ¸®
-        cl_mem dividedQkvBuffer[3];
+        // í—¤ë“œ ë¶„ë¦¬
         for (int i = 0; i < 3; i++) {
-            dividedQkvBuffer[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * head_dim, NULL, &err);
+            err = clSetKernelArg(kernel_divide, 0, sizeof(cl_mem), &qkvBuffer[i]);
             CHECK_ERROR(err);
-
-            clSetKernelArg(kernel_divide, 0, sizeof(cl_mem), &qkvBuffer[i]);
+            err = clSetKernelArg(kernel_divide, 1, sizeof(cl_mem), &dividedQkvBuffer[i]);
             CHECK_ERROR(err);
-            clSetKernelArg(kernel_divide, 1, sizeof(cl_mem), &dividedQkvBuffer[i]);
+            err = clSetKernelArg(kernel_divide, 2, sizeof(int), &embedDim);
             CHECK_ERROR(err);
-            clSetKernelArg(kernel_divide, 2, sizeof(int), &ed);
+            err = clSetKernelArg(kernel_divide, 3, sizeof(int), &head_dim);
             CHECK_ERROR(err);
-            clSetKernelArg(kernel_divide, 3, sizeof(int), &head_dim);
-            CHECK_ERROR(err);
-            clSetKernelArg(kernel_divide, 4, sizeof(int), &h);
+            err = clSetKernelArg(kernel_divide, 4, sizeof(int), &h);
             CHECK_ERROR(err);
 
             err = clEnqueueNDRangeKernel(queue, kernel_divide, 2, NULL, head_size, NULL, 0, NULL, NULL);
             CHECK_ERROR(err);
         }
-        // key ÀüÄ¡
-        cl_mem transposedKeyBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * head_dim, NULL, &err);
+        // key ì „ì¹˜
+        err = clSetKernelArg(kernel_transpose, 0, sizeof(cl_mem), &dividedQkvBuffer[1]);
         CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 0, sizeof(cl_mem), &dividedQkvBuffer[1]);
+        err = clSetKernelArg(kernel_transpose, 1, sizeof(cl_mem), &transposedKeyBuffer);
         CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 1, sizeof(cl_mem), &transposedKeyBuffer);
+        err = clSetKernelArg(kernel_transpose, 2, sizeof(int), &tokens);
         CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 2, sizeof(int), &tokens);
-        CHECK_ERROR(err);
-        clSetKernelArg(kernel_transpose, 3, sizeof(int), &head_dim);
+        err = clSetKernelArg(kernel_transpose, 3, sizeof(int), &head_dim);
         CHECK_ERROR(err);
         err = clEnqueueNDRangeKernel(queue, kernel_transpose, 2, NULL, head_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
-        clFinish(queue);
 
-        // score(QxKt) Çà·Ä »ı¼º
-        cl_mem scoreBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * tokens, NULL, &err);
-        CHECK_ERROR(err);
+        // score(QxKt) í–‰ë ¬ ìƒì„±
         err = clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &dividedQkvBuffer[0]);
         CHECK_ERROR(err);
         err = clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &transposedKeyBuffer);
@@ -344,96 +311,98 @@ void multihead_attn(float* input, float* output, Network in_weight, Network in_b
         CHECK_ERROR(err);
         err = clSetKernelArg(kernel_gemm, 5, sizeof(int), &head_dim);
         CHECK_ERROR(err);
-        size_t score_global_size[2] = { tokens, tokens };
-        err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, score_global_size, NULL, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, score_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
 
-        // ½ºÄÚ¾î ½ºÄÉÀÏ¸µ
-        cl_kernel kernel_scale = clCreateKernel(program, "scale", &err);
-        CHECK_ERROR(err);
+        // ìŠ¤ì½”ì–´ ìŠ¤ì¼€ì¼ë§
         err = clSetKernelArg(kernel_scale, 0, sizeof(cl_mem), &scoreBuffer);
         CHECK_ERROR(err);
-        float hd = head_dim;
-        err = clSetKernelArg(kernel_scale, 1, sizeof(float), &hd);
+        err = clSetKernelArg(kernel_scale, 1, sizeof(float), &hd_float);
         CHECK_ERROR(err);
-        err = clEnqueueNDRangeKernel(queue, kernel_scale, 2, NULL, score_global_size, NULL, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, kernel_scale, 2, NULL, score_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
 
-        // softmax Àû¿ë
-        printf("%d\n", tokens);
-        cl_kernel kernel_softmax = clCreateKernel(program, "softmax_score", &err);
-        CHECK_ERROR(err);
+        // softmax ì ìš©
         err = clSetKernelArg(kernel_softmax, 0, sizeof(cl_mem), &scoreBuffer);
         CHECK_ERROR(err);
         err = clSetKernelArg(kernel_softmax, 1, sizeof(float) * tokens, NULL);
         CHECK_ERROR(err);
-        size_t softmax_local_size[2] = { 1, tokens };
-        err = clEnqueueNDRangeKernel(queue, kernel_softmax, 2, NULL, score_global_size, softmax_local_size, 0, NULL, NULL);
+        err = clSetKernelArg(kernel_softmax, 2, sizeof(int), &padding);
+        CHECK_ERROR(err);
+        err = clEnqueueNDRangeKernel(queue, kernel_softmax, 2, NULL, score_size, softmax_local_size, 0, NULL, NULL);
         CHECK_ERROR(err);
 
-        /*for (int i = 0; i < tokens; i++) {
-            float max_val = scores[i * tokens];
-            for (int j = 1; j < tokens; j++) {
-                if (scores[i * tokens + j] > max_val) max_val = scores[i * tokens + j];
-            }
-            float sum_exp = 0.0f;
-            for (int j = 0; j < tokens; j++) {
-                scores[i * tokens + j] = expf(scores[i * tokens + j] - max_val);
-                sum_exp += scores[i * tokens + j];
-            }
-
-            for (int j = 0; j < tokens; j++) {
-                scores[i * tokens + j] /= sum_exp;
-            }
-        }*/
-
-        //for test
-        // attn_score ÀúÀå °ø°£
-        float* scores = (float*)malloc(sizeof(float) * tokens * tokens);
-        err = clEnqueueReadBuffer(queue, scoreBuffer, CL_TRUE, 0, sizeof(float) * tokens * tokens, scores, 0, NULL, NULL);
+        // Score*V ê³„ì‚°
+        err = clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &scoreBuffer);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &dividedQkvBuffer[2]);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &headOutputBuffer);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_gemm, 3, sizeof(int), &tokens);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_gemm, 4, sizeof(int), &head_dim);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_gemm, 5, sizeof(int), &tokens);
+        CHECK_ERROR(err);
+        err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, rev_head_size, NULL, 0, NULL, NULL);
         CHECK_ERROR(err);
 
-        // scores¿Í V¸¦ °öÇØ head output °è»ê
-        float* head_out = (float*)malloc(sizeof(float) * tokens * head_dim);
-        for (int i = 0; i < tokens; i++) {
-            for (int d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
-                for (int j = 0; j < tokens; j++) {
-                    sum += scores[i * tokens + j] * V[j * embed_dim + head_offset + d];
-                }
-                head_out[i * head_dim + d] = sum;
-            }
-        }
-
-        // head_out¸¦ attn_outputÀÇ ÇØ´ç ºÎºĞ¿¡ º¹»ç
-        for (int i = 0; i < tokens; i++) {
-            for (int d = 0; d < head_dim; d++) {
-                attn_output[i * embed_dim + head_offset + d] = head_out[i * head_dim + d];
-            }
-        }
-
-        free(scores);
-        free(head_out);
+        // head ê³„ì‚° ê²°ê³¼ concat
+        err = clSetKernelArg(kernel_concat, 0, sizeof(cl_mem), &attnOutputBuffer);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_concat, 1, sizeof(cl_mem), &headOutputBuffer);
+        CHECK_ERROR(err);
+        err = clSetKernelArg(kernel_concat, 2, sizeof(int), &embedDim);
+        CHECK_ERROR(err);
+        int headOffset = h * head_dim;
+        err = clSetKernelArg(kernel_concat, 3, sizeof(int), &headOffset);
+        CHECK_ERROR(err);
+        err = clEnqueueNDRangeKernel(queue, kernel_concat, 2, NULL, head_size, NULL, 0, NULL, NULL);
+        CHECK_ERROR(err);
     }
 
-    free(Q); free(K); free(V);
+    // out_weight ì „ì¹˜ - gemm ê³„ì‚°ì„ ìœ„í•œ ì „ì²˜ë¦¬
+    err = clSetKernelArg(kernel_transpose, 0, sizeof(cl_mem), &outWeightBuffer[encoder_count]);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_transpose, 1, sizeof(cl_mem), &transposedOutWeightBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_transpose, 2, sizeof(int), &embedDim);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_transpose, 3, sizeof(int), &embedDim);
+    CHECK_ERROR(err);
+    err = clEnqueueNDRangeKernel(queue, kernel_transpose, 2, NULL, weight_traspose_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
 
-    // ÃÖÁ¾ ¼±Çü ÇÁ·ÎÁ§¼Ç
-    for (int t = 0; t < tokens; t++) {
-        for (int i = 0; i < embed_dim; i++) {
-            float sum = out_bias.data[i];
-            for (int j = 0; j < embed_dim; j++) {
-                sum += attn_output[t * embed_dim + j] * out_weight.data[i * embed_dim + j];
-            }
-            output[t * embed_dim + i] = sum;
-        }
-    }
-    free(attn_output);
+    // out_weight ì ìš©
+    err = clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &attnOutputBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &transposedOutWeightBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &outputBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_gemm, 3, sizeof(int), &tokens);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_gemm, 4, sizeof(int), &embedDim);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_gemm, 5, sizeof(int), &embedDim);
+    CHECK_ERROR(err);
+    err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, weight_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
 
-    clReleaseKernel(kernel_gemm);
-    clReleaseKernel(kernel_add);
-    clReleaseKernel(kernel_transpose);
-    clReleaseKernel(kernel_divide);
+    // out_bias ê°’ ë”í•˜ê¸°
+    err = clSetKernelArg(kernel_add_bias, 0, sizeof(cl_mem), &outputBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_add_bias, 1, sizeof(cl_mem), &outBiasBuffer[encoder_count]);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_add_bias, 2, sizeof(int), &embedDim);
+    CHECK_ERROR(err);
+    err = clEnqueueNDRangeKernel(queue, kernel_add_bias, 2, NULL, weight_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    // ìµœì¢… ê²°ê³¼ ì½ì–´ì™€ì„œ outputì— ì €ì¥
+    err = clEnqueueReadBuffer(queue, outputBuffer, CL_TRUE, 0, sizeof(float) * tokens * embedDim, output, 0, NULL, NULL);
+    CHECK_ERROR(err);
 }
 
 float gelu(float x) {
@@ -461,12 +430,10 @@ void mlp_block(float* input, float* output, Network fc1_weight, Network fc1_bias
     int Embed_dim = embed_dim; //768
     int hidden_dim = ((int)(embed_dim * mlp_ratio)); //3072
 
-
-
     float* fc1_out = (float*)malloc(sizeof(float) * tokens * hidden_dim);
 
     linear_layer(input, fc1_out, tokens, embed_dim, hidden_dim, fc1_weight, fc1_bias);
-    // GELU È°¼ºÈ­
+    // GELU í™œì„±í™”
     for (int i = 0; i < tokens * hidden_dim; i++) {
         fc1_out[i] = gelu(fc1_out[i]);
     }
@@ -493,7 +460,7 @@ void Encoder(float* input, float* output,
 
     /*Attn*/
     startTime = clock();
-    multihead_attn(ln1_out, attn_out, attn_w, attn_b, attn_out_w, attn_out_b);
+    multihead_attn(ln1_out, attn_out);
     endTime = clock();
     mhaTime += endTime - startTime;
 
@@ -520,10 +487,12 @@ void Encoder(float* input, float* output,
 
     clock_t e = clock();
     ecnTime += (e - s);
+
+    encoder_count++;
 }
 
 void Softmax(float* logits, float* probabilities, int length) {
-    // ¼öÄ¡ ¾ÈÁ¤¼ºÀ» À§ÇÑ ÃÖ´ë°ª °è»ê
+    // ìˆ˜ì¹˜ ì•ˆì •ì„±ì„ ìœ„í•œ ìµœëŒ€ê°’ ê³„ì‚°
     float max_val = logits[0];
     for (int i = 1; i < length; i++) {
         if (logits[i] > max_val) {
@@ -531,20 +500,20 @@ void Softmax(float* logits, float* probabilities, int length) {
         }
     }
 
-    // °¢ ¿ø¼Ò¿¡ ´ëÇØ exp(logit - max_val)À» °è»êÇÏ°í ÇÕ»ê
+    // ê° ì›ì†Œì— ëŒ€í•´ exp(logit - max_val)ì„ ê³„ì‚°í•˜ê³  í•©ì‚°
     float sum_exp = 0.0f;
     for (int i = 0; i < length; i++) {
         probabilities[i] = expf(logits[i] - max_val);
         sum_exp += probabilities[i];
     }
 
-    // È®·ü°ªÀ¸·Î Á¤±ÔÈ­
+    // í™•ë¥ ê°’ìœ¼ë¡œ ì •ê·œí™”
     for (int i = 0; i < length; i++) {
         probabilities[i] /= sum_exp;
     }
 }
 
-////////////////////////////////////// layerº° size //////////////////////////////////////
+////////////////////////////////////// layerë³„ size //////////////////////////////////////
 const int size[] = {
     embed_dim * (img_size / patch_size) * (img_size / patch_size), // conv2D
     embed_dim * (img_size / patch_size) * (img_size / patch_size), // flatten and transpose
@@ -554,9 +523,9 @@ const int size[] = {
 
 const int enc_size = embed_dim * ((img_size / patch_size) * (img_size / patch_size) + 1);
 
-////////////////////////////////////// Model Architecture //////////////////////////////////////
-void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
+void InitOpenCLElements(Network* networks) {
 
+    // ê¸°ê¸° ì„¤ì •
     err = clGetPlatformIDs(1, &platform, NULL);
     CHECK_ERROR(err);
     err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
@@ -573,12 +542,118 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
     build_error(program, device, err);
     CHECK_ERROR(err);
 
-    int token_size = ((img_size / patch_size) * (img_size / patch_size) + 1);
+    // MHA ì»¤ë„
+    kernel_transpose = clCreateKernel(program, "transpose", &err);
+    CHECK_ERROR(err);
+    kernel_gemm = clCreateKernel(program, "gemm", &err);
+    CHECK_ERROR(err);
+    kernel_add_bias = clCreateKernel(program, "add_bias", &err);
+    CHECK_ERROR(err);
+    kernel_divide = clCreateKernel(program, "divide_head", &err);
+    CHECK_ERROR(err);
+    kernel_scale = clCreateKernel(program, "scale_score", &err);
+    CHECK_ERROR(err);
+    kernel_softmax = clCreateKernel(program, "softmax_score", &err);
+    CHECK_ERROR(err);
+    kernel_concat = clCreateKernel(program, "copy_head_output", &err);
+    CHECK_ERROR(err);
+
+    // MHA ë²„í¼
+    int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
+    int head_dim = embed_dim / num_heads;
+    inputBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * tokens * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    for (int i = 0; i < 3; i++) {
+        qkvBuffer[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
+        CHECK_ERROR(err);
+        transposedInWeightBuffer[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+        CHECK_ERROR(err);
+        dividedQkvBuffer[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * head_dim, NULL, &err);
+        CHECK_ERROR(err);
+    }
+    transposedKeyBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * head_dim, NULL, &err);
+    CHECK_ERROR(err);
+    scoreBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * tokens, NULL, &err);
+    CHECK_ERROR(err);
+    headOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * head_dim, NULL, &err);
+    CHECK_ERROR(err);
+    attnOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    transposedOutWeightBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    outputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+
+    for (int i = 0; i < depth; i++) {
+        for (int j = 0; j < 3; j++) {
+            inWeightBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+            CHECK_ERROR(err);
+            inBiasBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
+            CHECK_ERROR(err);
+        }
+        outWeightBuffer[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+        CHECK_ERROR(err);
+        outBiasBuffer[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * embed_dim, NULL, &err);
+        CHECK_ERROR(err);
+    }
+    // in_weight, in_bias, out_weight, out_bias ì „ì†¡
+    for (int i = 0; i < depth; i++) {
+        for (int j = 0; j < 3; j++) {
+            err = clEnqueueWriteBuffer(queue, inWeightBuffer[i][j], CL_TRUE, 0, sizeof(float) * embed_dim * embed_dim, (networks[6 + i * depth].data + j * embed_dim * embed_dim), 0, NULL, NULL);
+            CHECK_ERROR(err);
+            err = clEnqueueWriteBuffer(queue, inBiasBuffer[i][j], CL_TRUE, 0, sizeof(float) * embed_dim, (networks[7 + i * depth].data + j * embed_dim), 0, NULL, NULL);
+            CHECK_ERROR(err);
+        }
+        err = clEnqueueWriteBuffer(queue, outWeightBuffer[i], CL_TRUE, 0, sizeof(float) * embed_dim * embed_dim, networks[8 + i * depth].data, 0, NULL, NULL);
+        CHECK_ERROR(err);
+        err = clEnqueueWriteBuffer(queue, outBiasBuffer[i], CL_TRUE, 0, sizeof(float) * embed_dim, networks[9 + i * depth].data, 0, NULL, NULL);
+        CHECK_ERROR(err);
+    }
+}
+void ReleaseOpenCLElements() {
+
+    // MHA ì»¤ë„
+    clReleaseKernel(kernel_divide);
+    clReleaseKernel(kernel_transpose);
+    clReleaseKernel(kernel_gemm);
+    clReleaseKernel(kernel_add_bias);
+    // MHA ë²„í¼
+    clReleaseMemObject(inputBuffer);
+    for (int i = 0; i < 12; i++) {
+        for (int j = 0; j < 3; j++) {
+            clReleaseMemObject(inWeightBuffer[i][j]);
+            clReleaseMemObject(inBiasBuffer[i][j]);
+        }
+        clReleaseMemObject(outWeightBuffer[i]);
+        clReleaseMemObject(outBiasBuffer[i]);
+    }
+    for (int i = 0; i < 3; i++) {
+        clReleaseMemObject(transposedInWeightBuffer[i]);
+        clReleaseMemObject(dividedQkvBuffer[i]);
+    }
+    clReleaseMemObject(transposedKeyBuffer);
+    clReleaseMemObject(scoreBuffer);
+    clReleaseMemObject(headOutputBuffer);
+    clReleaseMemObject(attnOutputBuffer);
+    clReleaseMemObject(transposedOutWeightBuffer);
+    clReleaseMemObject(outputBuffer);
+
+    // ê¸°ê¸° ì„¤ì • í•´ì œ
+    clReleaseProgram(program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+    clReleaseDevice(device);
+    free(sources[0]);
+}
+
+////////////////////////////////////// Model Architecture //////////////////////////////////////
+void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
+
+    InitOpenCLElements(networks);
+
     float* layer[4];
     float* enc_layer[12];
     float* enc_output;
-    int  hidden_dim = ((int)(embed_dim * mlp_ratio));
-    //printf("%d %d = %d\n", token_size, hidden_dim, token_size * hidden_dim);
 
     for (int i = 0; i < 4; i++) {
         layer[i] = (float*)malloc(sizeof(float) * size[i]);
@@ -672,21 +747,17 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
 
         layer_norm(enc_layer[11], enc_output, networks[148], networks[149]);
 
-        /* Token °ª ÃßÃâ */
+        /* Token ê°’ ì¶”ì¶œ */
         float* cls_token = (float*)malloc(sizeof(float) * embed_dim);
         float* cls_output = (float*)malloc(sizeof(float) * num_classes);
         memcpy(cls_token, enc_output, sizeof(float) * embed_dim);
 
         linear_layer(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151]);
-        /* È®·üºĞÆ÷ ÃßÃâ */
+        /* í™•ë¥ ë¶„í¬ ì¶”ì¶œ */
         Softmax(cls_output, probabilities[i], num_classes);
         endTime = clock();
         printf("%d image: %lf\n", i, (double)(endTime - imgStartTime) / CLOCKS_PER_SEC);
     }
 
-    clReleaseProgram(program);
-    clReleaseCommandQueue(queue);
-    clReleaseContext(context);
-    clReleaseDevice(device);
-    free(sources[0]);
+    ReleaseOpenCLElements();
 }
