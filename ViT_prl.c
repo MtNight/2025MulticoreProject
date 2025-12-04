@@ -15,12 +15,12 @@
 #define depth 12
 #define num_heads 12
 #define mlp_ratio 4.0
-#define dropout 0.0
+#define dropout 0.0         //?? 이거 포함 아래 3개는 미사용?
 #define attn_dropout 0.0
 #define drop_path_rate 0.0
 #define eps 1e-6
 #define TILE 16
-#define NUM_IMAGE 1
+#define NUM_IMAGE 1     //for test. 100개로 고쳐야 함
 
 #define CHECK_ERROR(err) \
     if (err != CL_SUCCESS) { \
@@ -38,20 +38,22 @@ cl_queue_properties props[] = {
     CL_QUEUE_PROPERTIES,
     CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
     0 };
-#define NUM_KERNEL 2
-size_t kernel_source_size[NUM_KERNEL];
-char* sources[NUM_KERNEL];
+#define NUM_KERNEL_FILES 2
+size_t kernel_source_size[NUM_KERNEL_FILES];
+char* sources[NUM_KERNEL_FILES];
 cl_program program;
+
+// 이미지, 가중치 인덱싱용 전역변수들
 int image_count = 0;
 int encoder_count = 0;
 
-// Preprocessing에 필요한 커널, 버퍼
+// Preprocessing에 필요한 커널
 cl_kernel kernel_im2col;
 cl_kernel kernel_convAddBias;
+// Preprocessing에 필요한 버퍼
 cl_mem convInputBuffer[NUM_IMAGE], convArrangedInputBuffer;
 cl_mem convTmpBuffer, convOutputBuffer;
 cl_mem convWeightBuffer, convBiasBuffer;
-
 
 // MHA에 필요한 커널
 cl_kernel kernel_transpose;
@@ -67,6 +69,7 @@ cl_mem qkvBuffer[3], mhaInWeightBuffer[12][3], transposedInWeightBuffer[3], mhaI
 cl_mem transposedKeyBuffer, scoreBuffer, headOutputBuffer, attnOutputBuffer;
 cl_mem mhaOutWeightBuffer[12], transposedOutWeightBuffer, mhaOutBiasBuffer[12];
 
+// 실행 시간 체크용
 clock_t startTime, endTime, ecnTime, mhaTime, mlpTime;
 
 char* get_source_code(const char* file_name, size_t* len) {
@@ -110,7 +113,7 @@ void build_error(cl_program program, cl_device_id device, cl_int err) {
 
 ////////////////////////////////////// ViT function //////////////////////////////////////
 
-void Conv2d(float* input, float* output, Network weight, Network bias) {
+void Conv2d(float* input, float* output) {
     int imgSize = img_size;                     //224
     int patchSize = patch_size;                 //16
     int output_size = img_size / patch_size;    //14
@@ -125,62 +128,52 @@ void Conv2d(float* input, float* output, Network weight, Network bias) {
 
     // 원본 이미지를 행렬에 맞게 배열
     clSetKernelArg(kernel_im2col, 0, sizeof(cl_mem), &convInputBuffer[image_count]);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_im2col, 1, sizeof(cl_mem), &convArrangedInputBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_im2col, 2, sizeof(int), &imgSize);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_im2col, 3, sizeof(int), &patchSize);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_im2col, 4, sizeof(int), &output_size);
+    CHECK_ERROR(err);
     clEnqueueNDRangeKernel(queue, kernel_im2col, 2, NULL, img2col_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
 
     // 이미지*가중치 행렬곱을 활용해서 컨볼루션 곱 실행
     clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &convWeightBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &convArrangedInputBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &convTmpBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_gemm, 3, sizeof(int), &M);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_gemm, 4, sizeof(int), &N);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_gemm, 5, sizeof(int), &K);
+    CHECK_ERROR(err);
     clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, gemm_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
 
     // bias 합 및 읽어오기
     clSetKernelArg(kernel_convAddBias, 0, sizeof(cl_mem), &convTmpBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_convAddBias, 1, sizeof(cl_mem), &convBiasBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_convAddBias, 2, sizeof(cl_mem), &convOutputBuffer);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_convAddBias, 3, sizeof(int), &M);
+    CHECK_ERROR(err);
     clSetKernelArg(kernel_convAddBias, 4, sizeof(int), &output_size);
-
-    clEnqueueNDRangeKernel(queue, kernel_convAddBias, 2, NULL, add_bias_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    err = clEnqueueNDRangeKernel(queue, kernel_convAddBias, 2, NULL, add_bias_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
     clFinish(queue);
 
+    // 최종 계산 결과를 out에 읽어오기
     err = clEnqueueReadBuffer(queue, convOutputBuffer, CL_TRUE, 0, sizeof(float) * embed_dim * output_size * output_size, output, 0, NULL, NULL);
     CHECK_ERROR(err);
-
-    //for (int oc = 0; oc < embed_dim; ++oc) {
-    //    for (int oh = 0; oh < output_size; ++oh) {
-    //        for (int ow = 0; ow < output_size; ++ow) {
-    //            float sum = bias.data[oc];
-
-    //            for (int ic = 0; ic < in_chans; ++ic) {
-    //                for (int kh = 0; kh < patch_size; ++kh) {
-    //                    for (int kw = 0; kw < patch_size; ++kw) {
-    //                        int ih = oh * patch_size + kh;
-    //                        int iw = ow * patch_size + kw;
-    //                        int input_idx =   ic * img_size * img_size 
-    //                                        + ih * img_size 
-    //                                        + iw;
-    //                        int kernel_idx = (oc * in_chans + ic) * patch_size * patch_size 
-    //                                                         + kh * patch_size 
-    //                                                         + kw;
-
-    //                        sum += input[input_idx] * weight.data[kernel_idx];
-    //                    }
-    //                }
-    //            }
-
-    //            output[oc * output_size * output_size + 
-    //                   oh * output_size + 
-    //                   ow] = sum;
-    //        }
-    //    }
-    //}
 }
 
 void flatten_transpose(float* input, float* output) {
@@ -594,7 +587,7 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     sources[0] = get_source_code("kernel_MHA.cl", &kernel_source_size[0]);
     //sources[1] = get_source_code("kernel_MLP.cl", &kernel_source_size);
     sources[1] = get_source_code("kernel_Preprocess.cl", &kernel_source_size[1]);
-    program = clCreateProgramWithSource(context, NUM_KERNEL, (const char**)sources, &kernel_source_size, &err);
+    program = clCreateProgramWithSource(context, NUM_KERNEL_FILES, (const char**)sources, &kernel_source_size, &err);
     CHECK_ERROR(err);
     err = clBuildProgram(program, 1, &device, "", NULL, NULL);
     build_error(program, device, err);
@@ -672,7 +665,6 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     CHECK_ERROR(err);
     mhaOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
     CHECK_ERROR(err);
-
     for (int i = 0; i < depth; i++) {
         for (int j = 0; j < 3; j++) {
             mhaInWeightBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * embed_dim, NULL, &err);
@@ -756,7 +748,7 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         clock_t imgStartTime = clock();
         /*patch embedding*/
         startTime = clock();
-        Conv2d(image[image_count].data, layer[0], networks[1], networks[2]);
+        Conv2d(image[image_count].data, layer[0]);
         endTime = clock();
         printf("Cov2D: %lf\n", (double)(endTime - startTime) / CLOCKS_PER_SEC);
         /*flatten and transpose*/
@@ -769,6 +761,8 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         /*Encoder - 12 Layers*/
         encoder_count = 0;
         clock_t encStartTime = clock();
+        mhaTime = 0;
+        mlpTime = 0;
         ecnTime = 0;
         Encoder(layer[3], enc_layer[0],
             networks[4], networks[5], networks[6], networks[7],

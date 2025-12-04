@@ -5,8 +5,8 @@ C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(264,22): warning C4244
 C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(597,85): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
 C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(597,85): warning C4024: 'clCreateProgramWithSource': 형식 및 실제 매개 변수 4의 형식이 서로 다릅니다.
   코드를 생성하고 있습니다.
-  4 of 35 functions (11.4%) were compiled, the rest were copied from previous compilation.
+  0 of 35 functions ( 0.0%) were compiled, the rest were copied from previous compilation.
     0 functions were new in current compilation
-    4 functions had inline decision re-evaluated but remain unchanged
+    0 functions had inline decision re-evaluated but remain unchanged
   코드를 생성했습니다.
   MCP_Final.vcxproj -> C:\Users\eskwo\source\repos\MCP_Final\x64\Release\MCP_Final.exe
