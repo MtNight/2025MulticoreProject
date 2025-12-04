@@ -110,3 +110,29 @@ __kernel void copy_head_output(
 
     attn[i * embed_dim + head_offset + j] = head[i * get_global_size(1) + j];
 }
+////////////////////////////////////////////////////////////////////////////////////////
+
+__kernel void linear_kernel(
+    __global const float* input,
+    __global const float* weight,
+    __global const float* bias,
+    __global float* output,
+    int tokens,
+    int in_features,
+    int out_features
+) {
+    int t = get_global_id(0); // token
+    int o = get_global_id(1); // output feature
+
+    if (t >= tokens || o >= out_features) return;
+
+    float sum = bias[o];
+    int input_offset = t * in_features;
+    int weight_offset = o * in_features;
+
+    for (int i = 0; i < in_features; i++) {
+        sum += input[input_offset + i] * weight[weight_offset + i];
+    }
+
+    output[t * out_features + o] = sum;
+}
