@@ -112,27 +112,63 @@ __kernel void copy_head_output(
 }
 ////////////////////////////////////////////////////////////////////////////////////////
 
+#define TILE 16
+
 __kernel void linear_kernel(
-    __global const float* input,
-    __global const float* weight,
-    __global const float* bias,
-    __global float* output,
+    __global const float* input,   // [tokens * in_features]
+    __global const float* weight,  // [out_features * in_features]
+    __global const float* bias,    // [out_features]
+    __global float* output,        // [tokens * out_features]
     int tokens,
     int in_features,
     int out_features
 ) {
-    int t = get_global_id(0); // token
-    int o = get_global_id(1); // output feature
+    const int blockRow = get_group_id(0);   // token block
+    const int blockCol = get_group_id(1);   // out_feature block
 
-    if (t >= tokens || o >= out_features) return;
+    const int localRow = get_local_id(0);   // 0..TILE-1
+    const int localCol = get_local_id(1);   // 0..TILE-1
 
-    float sum = bias[o];
-    int input_offset = t * in_features;
-    int weight_offset = o * in_features;
+    const int row = blockRow * TILE + localRow; // token idx
+    const int col = blockCol * TILE + localCol; // out_feature idx
 
-    for (int i = 0; i < in_features; i++) {
-        sum += input[input_offset + i] * weight[weight_offset + i];
+    __local float As[TILE][TILE];
+    __local float Bs[TILE][TILE];
+
+    float sum = 0.0f;
+
+    // loop over k tiles
+    for (int kBase = 0; kBase < in_features; kBase += TILE) {
+        int a_k = kBase + localCol;   // column within input tile
+        int b_k = kBase + localRow;   // row within weight tile
+
+        // load A (input) element -> As[localRow][localCol]
+        if (row < tokens && a_k < in_features) {
+            As[localRow][localCol] = input[row * in_features + a_k];
+        } else {
+            As[localRow][localCol] = 0.0f;
+        }
+
+        // load B (weight) element -> Bs[localRow][localCol]
+        if (col < out_features && b_k < in_features) {
+            // weight layout: [out_feature * in_features + k]
+            Bs[localRow][localCol] = weight[col * in_features + b_k];
+        } else {
+            Bs[localRow][localCol] = 0.0f;
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // compute partial
+        for (int kk = 0; kk < TILE; ++kk) {
+            sum += As[localRow][kk] * Bs[kk][localCol];
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 
-    output[t * out_features + o] = sum;
+    // write result only if in-bounds
+    if (row < tokens && col < out_features) {
+        output[row * out_features + col] = sum + bias[col];
+    }
 }

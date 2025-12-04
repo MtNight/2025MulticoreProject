@@ -19,7 +19,7 @@
 #define attn_dropout 0.0
 #define drop_path_rate 0.0
 #define eps 1e-6
-#define TILE_SIZE 16
+#define TILE 16
 #define hidden_dim 3072
 
 #define CHECK_ERROR(err) \
@@ -465,7 +465,6 @@ void mlp_block_opencl(float* input, float* output, Network fc1_weight, Network f
     float* fc1_cpu = (float*)malloc(sizeof(float) * tokens * Hidden_dim);
     float* fc2_cpu = (float*)malloc(sizeof(float) * tokens * Embed_dim);
 
-    size_t global_fc1[2] = { tokens, Hidden_dim };
 
 
     // fc1 weight, bias 업로드
@@ -489,9 +488,14 @@ void mlp_block_opencl(float* input, float* output, Network fc1_weight, Network f
     clSetKernelArg(linear_kernel, 6, sizeof(int), &Hidden_dim);
 
 
-    size_t global[2] = { tokens, Hidden_dim };
-    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global_fc1, NULL, 0, NULL, NULL);
-    CHECK_ERROR(err);
+    size_t local[2] = { TILE, TILE };
+    size_t global_fc1[2] = {
+        ((size_t)((tokens + TILE - 1) / TILE)) * TILE,
+        ((size_t)((Hidden_dim + TILE - 1) / TILE)) * TILE
+    };
+
+    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global_fc1, local, 0, NULL, NULL);
+
 
     err = clEnqueueReadBuffer(queue, fc1_outBuffer, CL_TRUE, 0,
         sizeof(float) * tokens * Hidden_dim, fc1_cpu, 0, NULL, NULL);
@@ -524,8 +528,12 @@ void mlp_block_opencl(float* input, float* output, Network fc1_weight, Network f
     clSetKernelArg(linear_kernel, 5, sizeof(int), &Hidden_dim);
     clSetKernelArg(linear_kernel, 6, sizeof(int), &Embed_dim);
 
-    size_t global_fc2[2] = { tokens, Embed_dim };
-    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global_fc2, NULL, 0, NULL, NULL);
+
+    size_t global_fc2[2] = {
+        ((size_t)(tokens + TILE - 1) / TILE) * TILE,
+        ((size_t)(Embed_dim + TILE - 1) / TILE) * TILE
+    };
+    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global_fc2, local, 0, NULL, NULL);
     CHECK_ERROR(err);
 
     // 최종 output 읽기
