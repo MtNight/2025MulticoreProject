@@ -50,10 +50,12 @@ int encoder_count = 0;
 // Preprocessing에 필요한 커널
 cl_kernel kernel_im2col;
 cl_kernel kernel_convAddBias;
+cl_kernel kernel_addClassToken_posEmbeding;
 // Preprocessing에 필요한 버퍼
 cl_mem convInputBuffer[NUM_IMAGE], convArrangedInputBuffer;
-cl_mem convTmpBuffer, convOutputBuffer;
+cl_mem convTmpBuffer, preprocessingOutputBuffer;
 cl_mem convWeightBuffer, convBiasBuffer;
+cl_mem classTokenBuffer, posEmbedBuffer;
 
 // MHA에 필요한 커널
 cl_kernel kernel_transpose;
@@ -113,7 +115,7 @@ void build_error(cl_program program, cl_device_id device, cl_int err) {
 
 ////////////////////////////////////// ViT function //////////////////////////////////////
 
-void Conv2d(float* input, float* output) {
+void ImagePreprocessing(float* input, float* output) {
     int imgSize = img_size;                     //224
     int patchSize = patch_size;                 //16
     int output_size = img_size / patch_size;    //14
@@ -124,108 +126,69 @@ void Conv2d(float* input, float* output) {
     // Conv2D에 필요한 글로벌 메모리 사이즈
     size_t img2col_size[2] = { K, N };
     size_t gemm_size[2] = { N, M };
-    size_t add_bias_size[2] = { M, N };
+    size_t add_bias_size[3] = { output_size, output_size, M };
 
     // 원본 이미지를 행렬에 맞게 배열
-    clSetKernelArg(kernel_im2col, 0, sizeof(cl_mem), &convInputBuffer[image_count]);
+    err = clSetKernelArg(kernel_im2col, 0, sizeof(cl_mem), &convInputBuffer[image_count]);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_im2col, 1, sizeof(cl_mem), &convArrangedInputBuffer);
+    err = clSetKernelArg(kernel_im2col, 1, sizeof(cl_mem), &convArrangedInputBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_im2col, 2, sizeof(int), &imgSize);
+    err = clSetKernelArg(kernel_im2col, 2, sizeof(int), &imgSize);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_im2col, 3, sizeof(int), &patchSize);
+    err = clSetKernelArg(kernel_im2col, 3, sizeof(int), &patchSize);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_im2col, 4, sizeof(int), &output_size);
+    err = clSetKernelArg(kernel_im2col, 4, sizeof(int), &output_size);
     CHECK_ERROR(err);
-    clEnqueueNDRangeKernel(queue, kernel_im2col, 2, NULL, img2col_size, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(queue, kernel_im2col, 2, NULL, img2col_size, NULL, 0, NULL, NULL);
     CHECK_ERROR(err);
 
     // 이미지*가중치 행렬곱을 활용해서 컨볼루션 곱 실행
-    clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &convWeightBuffer);
+    err = clSetKernelArg(kernel_gemm, 0, sizeof(cl_mem), &convWeightBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &convArrangedInputBuffer);
+    err = clSetKernelArg(kernel_gemm, 1, sizeof(cl_mem), &convArrangedInputBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &convTmpBuffer);
+    err = clSetKernelArg(kernel_gemm, 2, sizeof(cl_mem), &convTmpBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_gemm, 3, sizeof(int), &M);
+    err = clSetKernelArg(kernel_gemm, 3, sizeof(int), &M);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_gemm, 4, sizeof(int), &N);
+    err = clSetKernelArg(kernel_gemm, 4, sizeof(int), &N);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_gemm, 5, sizeof(int), &K);
+    err = clSetKernelArg(kernel_gemm, 5, sizeof(int), &K);
     CHECK_ERROR(err);
-    clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, gemm_size, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(queue, kernel_gemm, 2, NULL, gemm_size, NULL, 0, NULL, NULL);
     CHECK_ERROR(err);
 
-    // bias 합 및 읽어오기
-    clSetKernelArg(kernel_convAddBias, 0, sizeof(cl_mem), &convTmpBuffer);
+    // bias 합 및 인덱스 정리
+    err = clSetKernelArg(kernel_convAddBias, 0, sizeof(cl_mem), &convTmpBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_convAddBias, 1, sizeof(cl_mem), &convBiasBuffer);
+    err = clSetKernelArg(kernel_convAddBias, 1, sizeof(cl_mem), &convBiasBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_convAddBias, 2, sizeof(cl_mem), &convOutputBuffer);
+    err = clSetKernelArg(kernel_convAddBias, 2, sizeof(cl_mem), &preprocessingOutputBuffer);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_convAddBias, 3, sizeof(int), &M);
+    err = clSetKernelArg(kernel_convAddBias, 3, sizeof(int), &M);
     CHECK_ERROR(err);
-    clSetKernelArg(kernel_convAddBias, 4, sizeof(int), &output_size);
+    err = clSetKernelArg(kernel_convAddBias, 4, sizeof(int), &output_size);
     CHECK_ERROR(err);
-    err = clEnqueueNDRangeKernel(queue, kernel_convAddBias, 2, NULL, add_bias_size, NULL, 0, NULL, NULL);
+    err = clEnqueueNDRangeKernel(queue, kernel_convAddBias, 3, NULL, add_bias_size, NULL, 0, NULL, NULL);
     CHECK_ERROR(err);
-    clFinish(queue);
+
+    // 클래스 토큰 붙이기, 포지션 임베딩
+    err = clSetKernelArg(kernel_addClassToken_posEmbeding, 0, sizeof(cl_mem), &preprocessingOutputBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_addClassToken_posEmbeding, 1, sizeof(cl_mem), &classTokenBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_addClassToken_posEmbeding, 2, sizeof(cl_mem), &posEmbedBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_addClassToken_posEmbeding, 3, sizeof(int), &M);
+    CHECK_ERROR(err);
+    size_t ctNpe_size = embed_dim * (output_size * output_size + 1);
+    err = clEnqueueNDRangeKernel(queue, kernel_addClassToken_posEmbeding, 1, NULL, &ctNpe_size, NULL, 0, NULL, NULL);
+    CHECK_ERROR(err);
 
     // 최종 계산 결과를 out에 읽어오기
-    err = clEnqueueReadBuffer(queue, convOutputBuffer, CL_TRUE, 0, sizeof(float) * embed_dim * output_size * output_size, output, 0, NULL, NULL);
+    clFinish(queue);
+    err = clEnqueueReadBuffer(queue, preprocessingOutputBuffer, CL_TRUE, 0, sizeof(float) * embed_dim * (output_size * output_size + 1), output, 0, NULL, NULL);
     CHECK_ERROR(err);
-}
-
-void flatten_transpose(float* input, float* output) {
-    int output_size = img_size / patch_size;
-    int num_patches = output_size * output_size;
-
-    // 각 공간 위치(oh, ow)를 하나의 패치로 취급하여 patch index 계산
-    for (int oh = 0; oh < output_size; oh++) {
-        for (int ow = 0; ow < output_size; ow++) {
-            int patch_idx = oh * output_size + ow;
-            for (int oc = 0; oc < embed_dim; oc++) {
-                // 기존 입력은 (oc, oh, ow)
-                int idx_input = (oc * output_size + oh) * output_size + ow;
-                // 원하는 출력은 (patch_idx, oc)
-                int idx_output = patch_idx * embed_dim + oc;
-                output[idx_output] = input[idx_input];
-                //printf("%f ",output[idx_output]);
-            }
-        }
-    }
-}
-
-void class_token(float* patch_tokens, float* final_tokens, Network cls_tk) {
-    // 이미지의 패치 수 계산: output_size = img_size / patch_size, num_patches = output_size^2
-    int output_size = img_size / patch_size;
-    int num_patches = output_size * output_size;
-
-    // 1. 첫 번째 토큰에 class token 복사 (networks[0].data에 저장됨, embed_dim 길이)
-    for (int j = 0; j < embed_dim; j++) {
-        final_tokens[j] = cls_tk.data[j];
-    }
-
-    // 2. 이후 patch_tokens를 이어붙임
-    // final_tokens의 인덱스 embed_dim부터, patch_tokens 전체(embed_dim * num_patches) 복사
-    memcpy(final_tokens + embed_dim, patch_tokens, sizeof(float) * embed_dim * num_patches);
-
-    int total_tokens = num_patches + 1; // class token + patch tokens
-    for (int i = 0; i < total_tokens * embed_dim; i++) {
-        //("%f ", final_tokens[i]);
-    }
-    //printf("\n");
-}
-
-void pos_emb(float* input, float* output, Network pos_emb) {
-    // output_size: 한 변의 패치 수, num_patches: 전체 패치 수, total_tokens: class token + patch tokens
-    int output_size = img_size / patch_size;
-    int num_patches = output_size * output_size;
-    int total_tokens = num_patches + 1;
-    int total_elements = total_tokens * embed_dim;
-    for (int i = 0; i < total_elements; i++) {
-        output[i] = input[i] + pos_emb.data[i];
-    }
 }
 
 void layer_norm(float* input, float* output, Network weight, Network bias) {
@@ -511,6 +474,7 @@ void Encoder(float* input, float* output,
     /*Attn*/
     startTime = clock();
     multihead_attn(ln1_out, attn_out);
+    clFinish(queue);
     endTime = clock();
     mhaTime += endTime - startTime;
 
@@ -525,6 +489,7 @@ void Encoder(float* input, float* output,
     /*MLP*/
     startTime = clock();
     mlp_block(ln2_out, mlp_out, mlp1_w, mlp1_b, mlp2_w, mlp2_b);
+    clFinish(queue);
     endTime = clock();
     mlpTime += endTime - startTime;
 
@@ -535,6 +500,7 @@ void Encoder(float* input, float* output,
 
     free(ln1_out); free(attn_out); free(residual); free(ln2_out); free(mlp_out);
 
+    clFinish(queue);
     clock_t e = clock();
     ecnTime += (e - s);
 
@@ -564,12 +530,6 @@ void Softmax(float* logits, float* probabilities, int length) {
 }
 
 ////////////////////////////////////// layer별 size //////////////////////////////////////
-const int size[] = {
-    embed_dim * (img_size / patch_size) * (img_size / patch_size), // conv2D
-    embed_dim * (img_size / patch_size) * (img_size / patch_size), // flatten and transpose
-    embed_dim * ((img_size / patch_size) * (img_size / patch_size) + 1), // class token
-    embed_dim * ((img_size / patch_size) * (img_size / patch_size) + 1) // position embedding
-};
 
 const int enc_size = embed_dim * ((img_size / patch_size) * (img_size / patch_size) + 1);
 
@@ -598,6 +558,8 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     CHECK_ERROR(err);
     kernel_convAddBias = clCreateKernel(program, "conv_add_bias", &err);
     CHECK_ERROR(err);
+    kernel_addClassToken_posEmbeding = clCreateKernel(program, "add_classToken_posEmbed", &err);
+    CHECK_ERROR(err);
     // preprocessing 버퍼
     int output_size = img_size / patch_size;
     for (int i = 0; i < NUM_IMAGE; i++) {
@@ -608,13 +570,17 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     CHECK_ERROR(err);
     convTmpBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * output_size * output_size, NULL, &err);
     CHECK_ERROR(err);
-    convOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * output_size * output_size, NULL, &err);
+    preprocessingOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * (output_size * output_size + 1), NULL, &err);
     CHECK_ERROR(err);
     convWeightBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * in_chans * patch_size * patch_size, NULL, &err);
     CHECK_ERROR(err);
     convBiasBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
     CHECK_ERROR(err);
-    // Conv2D 인풋 및 가중치 전송
+    classTokenBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    posEmbedBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * (output_size * output_size + 1), NULL, &err);
+    CHECK_ERROR(err);
+    // preprocessing 인풋 및 가중치 전송
     for (int i = 0; i < NUM_IMAGE; i++) {
         err = clEnqueueWriteBuffer(queue, convInputBuffer[i], CL_TRUE, 0, sizeof(float) * image->c * image->w * image->h, image[i].data, 0, NULL, NULL);
         CHECK_ERROR(err);
@@ -622,6 +588,10 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     err = clEnqueueWriteBuffer(queue, convWeightBuffer, CL_TRUE, 0, sizeof(float) * embed_dim * in_chans * patch_size * patch_size, networks[1].data, 0, NULL, NULL);
     CHECK_ERROR(err);
     err = clEnqueueWriteBuffer(queue, convBiasBuffer, CL_TRUE, 0, sizeof(float) * embed_dim, networks[2].data, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    err = clEnqueueWriteBuffer(queue, classTokenBuffer, CL_TRUE, 0, sizeof(float) * embed_dim, networks[0].data, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    err = clEnqueueWriteBuffer(queue, posEmbedBuffer, CL_TRUE, 0, sizeof(float) * embed_dim * (output_size * output_size + 1), networks[3].data, 0, NULL, NULL);
     CHECK_ERROR(err);
 
     // MHA 커널
@@ -666,7 +636,7 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     mhaOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
     CHECK_ERROR(err);
     for (int i = 0; i < depth; i++) {
-        for (int j = 0; j < 3; j++) {
+        for (int j = 0; j < in_chans; j++) {
             mhaInWeightBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * embed_dim, NULL, &err);
             CHECK_ERROR(err);
             mhaInBiasBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
@@ -679,7 +649,7 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     }
     // in_weight, in_bias, out_weight, out_bias 전송
     for (int i = 0; i < depth; i++) {
-        for (int j = 0; j < 3; j++) {
+        for (int j = 0; j < in_chans; j++) {
             err = clEnqueueWriteBuffer(queue, mhaInWeightBuffer[i][j], CL_TRUE, 0, sizeof(float) * embed_dim * embed_dim, (networks[6 + i * depth].data + j * embed_dim * embed_dim), 0, NULL, NULL);
             CHECK_ERROR(err);
             err = clEnqueueWriteBuffer(queue, mhaInBiasBuffer[i][j], CL_TRUE, 0, sizeof(float) * embed_dim, (networks[7 + i * depth].data + j * embed_dim), 0, NULL, NULL);
@@ -692,6 +662,22 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     }
 }
 void ReleaseOpenCLElements() {
+    // preprocessing 커널
+    clReleaseKernel(kernel_im2col);
+    clReleaseKernel(kernel_convAddBias);
+    clReleaseKernel(kernel_addClassToken_posEmbeding);
+    // preprocessing 버퍼
+    int output_size = img_size / patch_size;
+    for (int i = 0; i < NUM_IMAGE; i++) {
+        clReleaseMemObject(convInputBuffer[i]);
+    }
+    clReleaseMemObject(convArrangedInputBuffer);
+    clReleaseMemObject(convTmpBuffer);
+    clReleaseMemObject(preprocessingOutputBuffer);
+    clReleaseMemObject(convWeightBuffer);
+    clReleaseMemObject(convBiasBuffer);
+    clReleaseMemObject(classTokenBuffer);
+    clReleaseMemObject(posEmbedBuffer);
 
     // MHA 커널
     clReleaseKernel(kernel_divide);
@@ -700,8 +686,8 @@ void ReleaseOpenCLElements() {
     clReleaseKernel(kernel_mhaAddBias);
     // MHA 버퍼
     clReleaseMemObject(mhaInputBuffer);
-    for (int i = 0; i < 12; i++) {
-        for (int j = 0; j < 3; j++) {
+    for (int i = 0; i < depth; i++) {
+        for (int j = 0; j < in_chans; j++) {
             clReleaseMemObject(mhaInWeightBuffer[i][j]);
             clReleaseMemObject(mhaInBiasBuffer[i][j]);
         }
@@ -732,13 +718,11 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
 
     InitOpenCLElements(image, networks);
 
-    float* layer[4];
+    float* pre_layer;
     float* enc_layer[12];
     float* enc_output;
 
-    for (int i = 0; i < 4; i++) {
-        layer[i] = (float*)malloc(sizeof(float) * size[i]);
-    }
+    pre_layer = (float*)malloc(sizeof(float) * enc_size);
     for (int i = 0; i < 12; i++) {
         enc_layer[i] = (float*)malloc(sizeof(float) * enc_size);
     }
@@ -748,15 +732,10 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         clock_t imgStartTime = clock();
         /*patch embedding*/
         startTime = clock();
-        Conv2d(image[image_count].data, layer[0]);
+        ImagePreprocessing(image[image_count].data, pre_layer);
+        clFinish(queue);
         endTime = clock();
-        printf("Cov2D: %lf\n", (double)(endTime - startTime) / CLOCKS_PER_SEC);
-        /*flatten and transpose*/
-        flatten_transpose(layer[0], layer[1]);
-        /*prepend class token*/
-        class_token(layer[1], layer[2], networks[0]);
-        /*position embedding*/
-        pos_emb(layer[2], layer[3], networks[3]);
+        printf("ImagePreprocessing: %lf\n", (double)(endTime - startTime) / CLOCKS_PER_SEC);
 
         /*Encoder - 12 Layers*/
         encoder_count = 0;
@@ -764,7 +743,7 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         mhaTime = 0;
         mlpTime = 0;
         ecnTime = 0;
-        Encoder(layer[3], enc_layer[0],
+        Encoder(pre_layer, enc_layer[0],
             networks[4], networks[5], networks[6], networks[7],
             networks[8], networks[9], networks[10], networks[11],
             networks[12], networks[13], networks[14], networks[15]);
@@ -823,6 +802,7 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
             networks[136], networks[137], networks[138], networks[139],
             networks[140], networks[141], networks[142], networks[143],
             networks[144], networks[145], networks[146], networks[147]);
+        clFinish(queue);
         endTime = clock();
         printf("mha avg: %lf\n", (double)(mhaTime / 12.0f) / CLOCKS_PER_SEC);
         printf("mlp avg: %lf\n", (double)(mlpTime / 12.0f) / CLOCKS_PER_SEC);
@@ -839,8 +819,9 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         linear_layer(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151]);
         /* 확률분포 추출 */
         Softmax(cls_output, probabilities[image_count], num_classes);
+        clFinish(queue);
         endTime = clock();
-        printf("image %d: %lf\n", image_count, (double)(endTime - imgStartTime) / CLOCKS_PER_SEC);
+        printf("image %d: %lf\n\n", image_count, (double)(endTime - imgStartTime) / CLOCKS_PER_SEC);
     }
 
     ReleaseOpenCLElements();
