@@ -16,20 +16,20 @@ __kernel void gemm(
 __kernel void transpose(
     __global float* src,
     __global float* dst,
-    int row, int col) {
+    int ROW, int COL) {
     int r = get_global_id(0);
     int c = get_global_id(1);
 
-    dst[c * row + r] = src[r * col + c];
+    dst[c * ROW + r] = src[r * COL + c];
 }
 __kernel void add_bias(	
 	__global float* M,
 	__global float* B,
-	int embed_dim) {
+	int ROW) {
     int i = get_global_id(0);
     int t = get_global_id(1);
 
-    M[t * embed_dim + i] += B[i];
+    M[t * ROW + i] += B[i];
 }	
 __kernel void divide_head(
     __global float* src,
@@ -55,13 +55,6 @@ __kernel void softmax_score(
     __global float* src,
     __local float* tmp,
     int padding) {
-/*
-각 i에 대해서
-맥스값 구하기
-exp(원본값-맥스) 대입
-exp의 합 구하기
-exp합으로 나누기
-*/
     int i = get_global_id(0);
     int j = get_global_id(1);
     int tokens = get_global_size(0);
@@ -99,7 +92,6 @@ exp합으로 나누기
     // exp합으로 나눠서 최종값 도출
     src[i * tokens + j] = exp(src[i * tokens + j] - max) / sum;
 }
-
 __kernel void copy_head_output(
     __global float* attn,
     __global float* head,
