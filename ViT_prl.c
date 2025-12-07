@@ -48,6 +48,8 @@ cl_program program;
 int image_count = 0;
 int encoder_count = 0;
 
+int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
+
 // Preprocessing에 필요한 커널
 cl_kernel kernel_im2col;
 cl_kernel kernel_convAddBias;
@@ -57,6 +59,15 @@ cl_mem convInputBuffer[NUM_IMAGE], convArrangedInputBuffer;
 cl_mem convTmpBuffer, preprocessingOutputBuffer;
 cl_mem convWeightBuffer, convBiasBuffer;
 cl_mem classTokenBuffer, posEmbedBuffer;
+
+// Layer Normalize에 필요한 커널
+cl_kernel kernel_layer_normalize;
+// Layer Normalize에 필요한 버퍼
+cl_mem layerNormalizeInputBuffer, layerNormalizeOutputBuffer;
+cl_mem layerNormalizeWeightBuffer[12][2];
+cl_mem layerNormalizeBiasBuffer[12][2];
+cl_mem finalLayerNormalizeWeightBuffer;
+cl_mem finalLayerNormalizeBiasBuffer;
 
 // MHA에 필요한 커널
 cl_kernel kernel_transpose;
@@ -202,24 +213,52 @@ void ImagePreprocessing(float* input, float* output) {
     CHECK_ERROR(err);
 }
 
-void layer_norm(float* input, float* output, Network weight, Network bias) {
-    int token = ((img_size / patch_size) * (img_size / patch_size)) + 1;
+void layer_norm(float* input, float* output, int lnIndex) {
+    int ed = embed_dim;
+    int dvdEd = ed / 3;
+    cl_mem iBuffer, wBuffer, bBuffer;
+    err = clEnqueueWriteBuffer(queue, layerNormalizeInputBuffer, CL_TRUE, 0, sizeof(float) * tokens * embed_dim, input, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    clFinish(queue);
+    iBuffer = layerNormalizeInputBuffer;
 
-    for (int t = 0; t < token; t++) {
-        float sum = 0.0, sum_sq = 0.0;
-        for (int i = 0; i < embed_dim; i++) {
-            float val = input[t * embed_dim + i];
-            sum += val;
-            sum_sq += val * val;
-        }
-        float mean = sum / embed_dim;
-        float var = sum_sq / embed_dim - mean * mean;
-        float inv_std = 1.0f / sqrtf(var + eps);
-        for (int i = 0; i < embed_dim; i++) {
-            int idx = t * embed_dim + i;
-            output[idx] = (input[idx] - mean) * inv_std * weight.data[i] + bias.data[i];
-        }
+    if (lnIndex != 3) {
+        wBuffer = layerNormalizeWeightBuffer[encoder_count][lnIndex];
+        bBuffer = layerNormalizeBiasBuffer[encoder_count][lnIndex];
     }
+    else {
+        wBuffer = finalLayerNormalizeWeightBuffer;
+        bBuffer = finalLayerNormalizeBiasBuffer;
+    }
+
+    err = clSetKernelArg(kernel_layer_normalize, 0, sizeof(cl_mem), &iBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 1, sizeof(cl_mem), &wBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 2, sizeof(cl_mem), &bBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 3, sizeof(cl_mem), &layerNormalizeOutputBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 4, sizeof(float) * dvdEd, NULL);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 5, sizeof(float) * dvdEd, NULL);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 6, sizeof(float) * 3, NULL);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 7, sizeof(int), &tokens);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(kernel_layer_normalize, 8, sizeof(int), &ed);
+    CHECK_ERROR(err);
+    size_t norm_size[2] = { tokens , dvdEd };
+    size_t norm_local_size[2] = { 1 , dvdEd };
+    err = clEnqueueNDRangeKernel(queue, kernel_layer_normalize, 2, NULL, &norm_size, &norm_local_size, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    clFinish(queue);
+
+    // 최종 계산 결과를 out에 읽어오기
+    err = clEnqueueReadBuffer(queue, layerNormalizeOutputBuffer, CL_TRUE, 0, sizeof(float) * tokens * ed, output, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    clFinish(queue);
 }
 
 void multihead_attn(float* input, float* output) {
@@ -564,7 +603,7 @@ void Encoder(float* input, float* output,
     float* mlp_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
 
     /*LN1*/
-    layer_norm(input, ln1_out, ln1_w, ln1_b);
+    layer_norm(input, ln1_out, 0);
 
     /*Attn*/
     startTime = clock();
@@ -579,7 +618,7 @@ void Encoder(float* input, float* output,
     }
 
     /*LN2*/
-    layer_norm(residual, ln2_out, ln2_w, ln2_b);
+    layer_norm(residual, ln2_out, 1);
 
     /*MLP*/
     startTime = clock();
@@ -666,7 +705,7 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     CHECK_ERROR(err);
     convTmpBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * output_size * output_size, NULL, &err);
     CHECK_ERROR(err);
-    preprocessingOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * (output_size * output_size + 1), NULL, &err);
+    preprocessingOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * tokens, NULL, &err);
     CHECK_ERROR(err);
     convWeightBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim * in_chans * patch_size * patch_size, NULL, &err);
     CHECK_ERROR(err);
@@ -674,7 +713,7 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     CHECK_ERROR(err);
     classTokenBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim, NULL, &err);
     CHECK_ERROR(err);
-    posEmbedBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * (output_size * output_size + 1), NULL, &err);
+    posEmbedBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * embed_dim * tokens, NULL, &err);
     CHECK_ERROR(err);
     // preprocessing 인풋 및 가중치 전송
     for (int i = 0; i < NUM_IMAGE; i++) {
@@ -688,6 +727,44 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     err = clEnqueueWriteBuffer(queue, classTokenBuffer, CL_TRUE, 0, sizeof(float) * embed_dim, networks[0].data, 0, NULL, NULL);
     CHECK_ERROR(err);
     err = clEnqueueWriteBuffer(queue, posEmbedBuffer, CL_TRUE, 0, sizeof(float) * embed_dim * (output_size * output_size + 1), networks[3].data, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    // Layer Normalize 커널
+    kernel_layer_normalize = clCreateKernel(program, "layer_normalize", &err);
+    CHECK_ERROR(err);
+    // Layer Normalize 버퍼
+    for (int i = 0; i < depth; i++) {
+        for (int j = 0; j < 2; j++) {
+            layerNormalizeWeightBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
+            CHECK_ERROR(err);
+            layerNormalizeBiasBuffer[i][j] = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
+            CHECK_ERROR(err);
+        }
+    }
+    finalLayerNormalizeWeightBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    finalLayerNormalizeBiasBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    layerNormalizeInputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+    layerNormalizeOutputBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * tokens * embed_dim, NULL, &err);
+    CHECK_ERROR(err);
+
+    // Layer Normalize 가중치 전송
+    for (int i = 0; i < depth; i++) {
+        int idx = 4 + i * 12;
+        err = clEnqueueWriteBuffer(queue, layerNormalizeWeightBuffer[i][0], CL_TRUE, 0, sizeof(float) * embed_dim, networks[idx].data, 0, NULL, NULL);
+        CHECK_ERROR(err);
+        err = clEnqueueWriteBuffer(queue, layerNormalizeBiasBuffer[i][0], CL_TRUE, 0, sizeof(float) * embed_dim, networks[idx + 1].data, 0, NULL, NULL);
+        CHECK_ERROR(err);
+        err = clEnqueueWriteBuffer(queue, layerNormalizeWeightBuffer[i][1], CL_TRUE, 0, sizeof(float) * embed_dim, networks[idx + 6].data, 0, NULL, NULL);
+        CHECK_ERROR(err);
+        err = clEnqueueWriteBuffer(queue, layerNormalizeBiasBuffer[i][1], CL_TRUE, 0, sizeof(float) * embed_dim, networks[idx + 7].data, 0, NULL, NULL);
+        CHECK_ERROR(err);
+    }
+    err = clEnqueueWriteBuffer(queue, finalLayerNormalizeWeightBuffer, CL_TRUE, 0, sizeof(float) * embed_dim, networks[148].data, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    err = clEnqueueWriteBuffer(queue, finalLayerNormalizeBiasBuffer, CL_TRUE, 0, sizeof(float) * embed_dim, networks[149].data, 0, NULL, NULL);
     CHECK_ERROR(err);
 
     // MHA 커널
@@ -707,7 +784,6 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     CHECK_ERROR(err);
 
     // MHA 버퍼
-    int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
     int head_dim = embed_dim / num_heads;
     mhaInputBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * tokens * embed_dim, NULL, &err);
     CHECK_ERROR(err);
@@ -802,6 +878,20 @@ void ReleaseOpenCLElements() {
     clReleaseMemObject(classTokenBuffer);
     clReleaseMemObject(posEmbedBuffer);
 
+    // Layer Normalize 커널
+    clReleaseKernel(kernel_layer_normalize);
+    // Layer Normalize 버퍼
+    for (int i = 0; i < depth; i++) {
+        for (int j = 0; j < 2; j++) {
+            clReleaseMemObject(layerNormalizeWeightBuffer[i][j]);
+            clReleaseMemObject(layerNormalizeBiasBuffer[i][j]);
+        }
+    }
+    clReleaseMemObject(finalLayerNormalizeWeightBuffer);
+    clReleaseMemObject(finalLayerNormalizeBiasBuffer);
+    clReleaseMemObject(layerNormalizeInputBuffer);
+    clReleaseMemObject(layerNormalizeOutputBuffer);
+
     // MHA 커널
     clReleaseKernel(kernel_divide);
     clReleaseKernel(kernel_transpose);
@@ -836,6 +926,7 @@ void ReleaseOpenCLElements() {
     clReleaseMemObject(bias2Buffer);
     clReleaseMemObject(bias1Buffer);
     clReleaseKernel(linear_kernel);
+
     // 기기 설정 해제
     clReleaseProgram(program);
     clReleaseCommandQueue(queue);
@@ -940,7 +1031,7 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         printf("Encoder avg: %lf\n", (double)(ecnTime / 12.0f) / CLOCKS_PER_SEC);
         printf("Encoder 12: %lf\n", (double)(endTime - encStartTime) / CLOCKS_PER_SEC);
 
-        layer_norm(enc_layer[11], enc_output, networks[148], networks[149]);
+        layer_norm(enc_layer[11], enc_output, 3);
 
         /* Token 값 추출 */
         float* cls_token = (float*)malloc(sizeof(float) * embed_dim);
