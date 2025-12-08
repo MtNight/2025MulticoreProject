@@ -69,6 +69,10 @@ cl_mem outputBuffer_mlp;
 //겔루~
 cl_kernel gelukernel;
 
+cl_kernel softmax_kernel;
+cl_mem logits_buf;
+cl_mem probs_buf;
+
 clock_t startTime, endTime, ecnTime, mhaTime, mlpTime;
 
 char* get_source_code(const char* file_name, size_t* len) {
@@ -665,6 +669,36 @@ void Softmax(float* logits, float* probabilities, int length) {
     }
 }
 
+void Softmax_opencl(float* logits, float* probs, int batch, int classes)
+{
+    // 1) logits 업로드
+    err = clEnqueueWriteBuffer(queue, logits_buf, CL_TRUE, 0,
+        sizeof(float) * batch * classes, logits, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    // 2) 커널 인자 설정
+    err = clSetKernelArg(softmax_kernel, 0, sizeof(cl_mem), &logits_buf);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(softmax_kernel, 1, sizeof(cl_mem), &probs_buf);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(softmax_kernel, 2, sizeof(int), &classes);
+    CHECK_ERROR(err);
+
+    // 3) 커널 실행: batch 개의 work-item, 각 work-item이 한 row 처리
+    size_t gws[1] = { (size_t)batch };
+    size_t lws[1] = { 1 };
+
+    err = clEnqueueNDRangeKernel(queue, softmax_kernel, 1,
+        NULL, gws, lws, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    // 4) 결과 읽기
+    err = clEnqueueReadBuffer(queue, probs_buf, CL_TRUE, 0,
+        sizeof(float) * batch * classes, probs, 0, NULL, NULL);
+    CHECK_ERROR(err);
+}
+
+
 ////////////////////////////////////// layer별 size //////////////////////////////////////
 const int size[] = {
     embed_dim * (img_size / patch_size) * (img_size / patch_size), // conv2D
@@ -792,6 +826,17 @@ void InitOpenCLElements(Network* networks) {
     CHECK_ERROR(err);
 
     gelukernel = clCreateKernel(program, "gelu_kernel_inplace", &err);
+    softmax_kernel = clCreateKernel(program, "softmax_kernel", &err);
+    int max_batch = 1;
+    int max_classes = num_classes;
+
+    logits_buf = clCreateBuffer(context, CL_MEM_READ_ONLY,
+        sizeof(float) * max_batch * max_classes, NULL, &err);
+    CHECK_ERROR(err);
+
+    probs_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
+        sizeof(float) * max_batch * max_classes, NULL, &err);
+    CHECK_ERROR(err);
 
 }
 void ReleaseOpenCLElements() {
@@ -948,7 +993,12 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         linear_layer_opencl(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151],
             inputBuffer_mlp, weight1Buffer, bias1Buffer, fc1_outBuffer);
         /* 확률분포 추출 */
-        Softmax(cls_output, probabilities[i], num_classes);
+        //Softmax(cls_output, probabilities[i], num_classes);
+
+        // logits에 값 채우기...
+        Softmax_opencl(cls_output, probabilities[i], 1, num_classes);
+
+
         endTime = clock();
         printf("%d image: %lf\n", i, (double)(endTime - imgStartTime) / CLOCKS_PER_SEC);
     }
