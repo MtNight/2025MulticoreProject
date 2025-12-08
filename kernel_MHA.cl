@@ -45,19 +45,20 @@ __kernel void divide_head(
 }
 __kernel void scale_score(
     __global float* src,
-    float scaler) {
+    float scaler,
+    int tokens) {
     int i = get_global_id(0);
     int j = get_global_id(1);
 
-    src[i * get_global_size(0) + j] /= sqrt(scaler);
+    src[i * tokens + j] /= sqrt(scaler);
 }
 __kernel void softmax_score(
     __global float* src,
     __local float* tmp,
-    int padding) {
+    int padding,
+    int tokens) {
     int i = get_global_id(0);
     int j = get_global_id(1);
-    int tokens = get_global_size(0);
 
     // 로컬 값 대입
     tmp[j] = src[i * tokens + j];
@@ -97,11 +98,12 @@ __kernel void copy_head_output(
     __global float* attn,
     __global float* head,
     int embed_dim,
-    int head_offset) {
+    int head_offset,
+    int head_dim) {
     int i = get_global_id(0);
     int j = get_global_id(1);
 
-    attn[i * embed_dim + head_offset + j] = head[i * get_global_size(1) + j];
+    attn[i * embed_dim + head_offset + j] = head[i * head_dim + j];
 }
 __kernel void layer_normalize(
     __global float* src,
@@ -115,7 +117,6 @@ __kernel void layer_normalize(
     int embed_dim) {
     int t = get_global_id(0);
     int d = get_global_id(1);
-    
     
     float sum = 0;
     float sum_sq = 0;
@@ -155,6 +156,17 @@ __kernel void layer_normalize(
         float v = src[idx_base];
         dst[idx_base] = (v - mean) * inv_std * weight[d + block*256] + bias[d + block*256];
     }
+}
+__kernel void residual(
+    __global float* src,
+    __global float* add, 
+    __global float* dst,
+    int embed_dim) {
+    int t = get_global_id(0);
+    int d = get_global_id(1);
+    int idx = t * embed_dim + d;
+
+    dst[idx] = src[idx] + add[idx];
 }
 ////////////////////////////////////////////////////////////////////////////////////////
 
