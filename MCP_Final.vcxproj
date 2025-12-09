@@ -158,6 +158,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="kernel_MLP.cl" />
+    <None Include="kernel_Other.cl" />
     <None Include="kernel_Preprocess.cl" />
     <None Include="kernel_MHA.cl" />
   </ItemGroup>
