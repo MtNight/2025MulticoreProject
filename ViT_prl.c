@@ -99,6 +99,12 @@ cl_mem bias1Buffer;
 cl_mem bias2Buffer;
 cl_mem fc1_outBuffer;
 cl_mem outputBuffer_mlp;
+//겔루~
+cl_kernel gelukernel;
+
+cl_kernel softmax_kernel;
+cl_mem logits_buf;
+cl_mem probs_buf;
 
 // 실행 시간 체크용
 clock_t startTime, endTime, ecnTime, mhaTime, mlpTime;
@@ -508,6 +514,21 @@ void multihead_attn(float* input, float* output) {
 float gelu(float x) {
     return 0.5f * x * (1.0f + erff(x / sqrtf(2.0f)));
 }
+void gelu_opencl() {
+    int N = 197 * hidden_dim; // or tokens*out_features depending on 대상
+    size_t local = 256;
+    size_t global = ((size_t)N + local - 1) / local * local;
+
+    err = clSetKernelArg(gelukernel, 0, sizeof(cl_mem), &fc1_outBuffer);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(gelukernel, 1, sizeof(int), &N);
+    CHECK_ERROR(err);
+
+    err = clEnqueueNDRangeKernel(queue, gelukernel, 1, NULL, &global, &local, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+}
+
 void gelu_activation(float* input, float* output, int size) {
     for (int i = 0; i < size; i++) {
         output[i] = gelu(input[i]);
@@ -525,6 +546,71 @@ void linear_layer(float* input, float* output, int tokens, int in_features, int 
         }
     }
 }
+void linear_layer_opencl(
+    float* input,            // CPU input
+    float* output,           // CPU output
+    int tokens,
+    int in_features,
+    int out_features,
+    Network weight,
+    Network bias,
+    cl_mem inputBuffer_ll,
+    cl_mem weightBuffer_ll,
+    cl_mem biasBuffer_ll,
+    cl_mem outputBuffer_ll
+) {
+    cl_int err;
+
+    int input_size = tokens * in_features;
+    int weight_size = in_features * out_features;
+    int bias_size = out_features;
+    int output_size = tokens * out_features;
+
+    // CPU-side output temp
+    float* output_cpu = (float*)malloc(sizeof(float) * output_size);
+
+    // 1) Upload input
+    if (input != NULL) {
+        err = clEnqueueWriteBuffer(queue, inputBuffer_ll, CL_TRUE, 0,
+            sizeof(float) * input_size, input, 0, NULL, NULL);
+    }
+
+    // 2) Upload weight
+    err = clEnqueueWriteBuffer(queue, weightBuffer_ll, CL_TRUE, 0,
+        sizeof(float) * weight_size, weight.data, 0, NULL, NULL);
+
+    // 3) Upload bias
+    err = clEnqueueWriteBuffer(queue, biasBuffer_ll, CL_TRUE, 0,
+        sizeof(float) * bias_size, bias.data, 0, NULL, NULL);
+
+    // 4) Set kernel args
+    clSetKernelArg(linear_kernel, 0, sizeof(cl_mem), &inputBuffer_ll);
+    clSetKernelArg(linear_kernel, 1, sizeof(cl_mem), &weightBuffer_ll);
+    clSetKernelArg(linear_kernel, 2, sizeof(cl_mem), &biasBuffer_ll);
+    clSetKernelArg(linear_kernel, 3, sizeof(cl_mem), &outputBuffer_ll);
+    clSetKernelArg(linear_kernel, 4, sizeof(int), &tokens);
+    clSetKernelArg(linear_kernel, 5, sizeof(int), &in_features);
+    clSetKernelArg(linear_kernel, 6, sizeof(int), &out_features);
+
+    // 5) Kernel launch
+    size_t local[2] = { TILE, TILE };
+    size_t global[2] = {
+        ((size_t)((tokens + TILE - 1) / TILE)) * TILE,
+        ((size_t)((out_features + TILE - 1) / TILE)) * TILE
+    };
+
+    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global, local, 0, NULL, NULL);
+
+    // 6) Read output
+    err = clEnqueueReadBuffer(queue, outputBuffer_ll, CL_TRUE, 0,
+        sizeof(float) * output_size, output_cpu, 0, NULL, NULL);
+
+    // write back to output pointer
+    memcpy(output, output_cpu, sizeof(float) * output_size);
+
+    free(output_cpu);
+}
+
 /*
 void mlp_block(float* input, float* output, Network fc1_weight, Network fc1_bias, Network fc2_weight, Network fc2_bias) {
     int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1; //197
@@ -547,82 +633,57 @@ void mlp_block_opencl(float* input, float* output, Network fc1_weight, Network f
     int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1; //197
     int Embed_dim = embed_dim; //768
     int Hidden_dim = hidden_dim;
-    err = clEnqueueWriteBuffer(queue, inputBuffer_mlp, CL_TRUE, 0,
-        sizeof(float) * tokens * Embed_dim, input, 0, NULL, NULL);
-    CHECK_ERROR(err);
+
     float* fc1_cpu = (float*)malloc(sizeof(float) * tokens * Hidden_dim);
-    float* fc2_cpu = (float*)malloc(sizeof(float) * tokens * Embed_dim);
 
-    size_t global_fc1[2] = { tokens, Hidden_dim };
-
-
-    // fc1 weight, bias 업로드
-    err = clEnqueueWriteBuffer(queue, weight1Buffer, CL_TRUE, 0,
-        sizeof(float) * Hidden_dim * Embed_dim,
-        fc1_weight.data, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
-    err = clEnqueueWriteBuffer(queue, bias1Buffer, CL_TRUE, 0,
-        sizeof(float) * Hidden_dim,
-        fc1_bias.data, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
-
-    clSetKernelArg(linear_kernel, 0, sizeof(cl_mem), &inputBuffer_mlp);
-    clSetKernelArg(linear_kernel, 1, sizeof(cl_mem), &weight1Buffer);
-    clSetKernelArg(linear_kernel, 2, sizeof(cl_mem), &bias1Buffer);
-    clSetKernelArg(linear_kernel, 3, sizeof(cl_mem), &fc1_outBuffer);
-    clSetKernelArg(linear_kernel, 4, sizeof(int), &tokens);
-    clSetKernelArg(linear_kernel, 5, sizeof(int), &Embed_dim);
-    clSetKernelArg(linear_kernel, 6, sizeof(int), &Hidden_dim);
-
-
-    size_t global[2] = { tokens, Hidden_dim };
-    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global_fc1, NULL, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
-    err = clEnqueueReadBuffer(queue, fc1_outBuffer, CL_TRUE, 0,
-        sizeof(float) * tokens * Hidden_dim, fc1_cpu, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
+    linear_layer_opencl(
+        input,                   // CPU input
+        fc1_cpu,                 // CPU output buffer
+        tokens,
+        Embed_dim,               // in
+        Hidden_dim,              // out
+        fc1_weight,
+        fc1_bias,
+        inputBuffer_mlp,
+        weight1Buffer,
+        bias1Buffer,
+        fc1_outBuffer
+    );
+    /*
     //GELU활성화
     for (int i = 0; i < tokens * Hidden_dim; i++) {
         fc1_cpu[i] = gelu(fc1_cpu[i]);
-    }
-    err = clEnqueueWriteBuffer(queue, fc1_outBuffer, CL_TRUE, 0,
-        sizeof(float) * tokens * Hidden_dim, fc1_cpu, 0, NULL, NULL);
+    }*/
+
+
+    int N = tokens * Hidden_dim;
+    size_t local = 256;
+    size_t global = ((size_t)N + local - 1) / local * local;
+    err = clSetKernelArg(gelukernel, 0, sizeof(cl_mem), &fc1_outBuffer); CHECK_ERROR(err);
+    err = clSetKernelArg(gelukernel, 1, sizeof(int), &N); CHECK_ERROR(err);
+
+    err = clEnqueueNDRangeKernel(queue, gelukernel, 1, NULL, &global, &local, 0, NULL, NULL);
     CHECK_ERROR(err);
 
-    err = clEnqueueWriteBuffer(queue, weight2Buffer, CL_TRUE, 0,
-        sizeof(float) * Embed_dim * Hidden_dim,
-        fc2_weight.data, 0, NULL, NULL);
-    CHECK_ERROR(err);
+    clEnqueueReadBuffer(queue, fc1_outBuffer, CL_TRUE, 0,
+        sizeof(float) * tokens * Hidden_dim,
+        fc1_cpu, 0, NULL, NULL);
 
-    err = clEnqueueWriteBuffer(queue, bias2Buffer, CL_TRUE, 0,
-        sizeof(float) * Embed_dim,
-        fc2_bias.data, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
-
-    clSetKernelArg(linear_kernel, 0, sizeof(cl_mem), &fc1_outBuffer);
-    clSetKernelArg(linear_kernel, 1, sizeof(cl_mem), &weight2Buffer);
-    clSetKernelArg(linear_kernel, 2, sizeof(cl_mem), &bias2Buffer);
-    clSetKernelArg(linear_kernel, 3, sizeof(cl_mem), &outputBuffer_mlp);
-    clSetKernelArg(linear_kernel, 4, sizeof(int), &tokens);
-    clSetKernelArg(linear_kernel, 5, sizeof(int), &Hidden_dim);
-    clSetKernelArg(linear_kernel, 6, sizeof(int), &Embed_dim);
-
-    size_t global_fc2[2] = { tokens, Embed_dim };
-    err = clEnqueueNDRangeKernel(queue, linear_kernel, 2, NULL, global_fc2, NULL, 0, NULL, NULL);
-    CHECK_ERROR(err);
-
-    // 최종 output 읽기
-    err = clEnqueueReadBuffer(queue, outputBuffer_mlp, CL_TRUE, 0,
-        sizeof(float) * tokens * Embed_dim, output, 0, NULL, NULL);
-    CHECK_ERROR(err);
+    linear_layer_opencl(
+        fc1_cpu,
+        output,
+        tokens,
+        Hidden_dim,             // in
+        Embed_dim,              // out
+        fc2_weight,
+        fc2_bias,
+        inputBuffer_mlp,
+        weight2Buffer,
+        bias2Buffer,
+        outputBuffer_mlp
+    );
 
     free(fc1_cpu);
-    free(fc2_cpu);
 
 }
 
@@ -700,6 +761,35 @@ void Softmax(float* logits, float* probabilities, int length) {
     for (int i = 0; i < length; i++) {
         probabilities[i] /= sum_exp;
     }
+}
+
+void Softmax_opencl(float* logits, float* probs, int batch, int classes)
+{
+    // 1) logits 업로드
+    err = clEnqueueWriteBuffer(queue, logits_buf, CL_TRUE, 0,
+        sizeof(float) * batch * classes, logits, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    // 2) 커널 인자 설정
+    err = clSetKernelArg(softmax_kernel, 0, sizeof(cl_mem), &logits_buf);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(softmax_kernel, 1, sizeof(cl_mem), &probs_buf);
+    CHECK_ERROR(err);
+    err = clSetKernelArg(softmax_kernel, 2, sizeof(int), &classes);
+    CHECK_ERROR(err);
+
+    // 3) 커널 실행: batch 개의 work-item, 각 work-item이 한 row 처리
+    size_t gws[1] = { (size_t)batch };
+    size_t lws[1] = { 1 };
+
+    err = clEnqueueNDRangeKernel(queue, softmax_kernel, 1,
+        NULL, gws, lws, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    // 4) 결과 읽기
+    err = clEnqueueReadBuffer(queue, probs_buf, CL_TRUE, 0,
+        sizeof(float) * batch * classes, probs, 0, NULL, NULL);
+    CHECK_ERROR(err);
 }
 
 void InitOpenCLElements(ImageData* image, Network* networks) {
@@ -883,9 +973,11 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     linear_kernel = clCreateKernel(program, "linear_kernel", &err);
     CHECK_ERROR(err);
 
+    size_t max_in = (embed_dim > Hidden_dim) ? embed_dim : Hidden_dim;
     inputBuffer_mlp = clCreateBuffer(context, CL_MEM_READ_ONLY,
-        sizeof(float) * tokens * embed_dim, NULL, &err);
+        sizeof(float) * tokens * max_in, NULL, &err);
     CHECK_ERROR(err);
+
     fc1_outBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE,
         sizeof(float) * tokens * Hidden_dim, NULL, &err);
     CHECK_ERROR(err);
@@ -904,6 +996,20 @@ void InitOpenCLElements(ImageData* image, Network* networks) {
     bias2Buffer = clCreateBuffer(context, CL_MEM_READ_ONLY,
         sizeof(float) * embed_dim, NULL, &err);
     CHECK_ERROR(err);
+
+    gelukernel = clCreateKernel(program, "gelu_kernel_inplace", &err);
+    softmax_kernel = clCreateKernel(program, "softmax_kernel", &err);
+    int max_batch = 1;
+    int max_classes = num_classes;
+
+    logits_buf = clCreateBuffer(context, CL_MEM_READ_ONLY,
+        sizeof(float) * max_batch * max_classes, NULL, &err);
+    CHECK_ERROR(err);
+
+    probs_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
+        sizeof(float) * max_batch * max_classes, NULL, &err);
+    CHECK_ERROR(err);
+
 }
 void ReleaseOpenCLElements() {
     // preprocessing 커널
@@ -1083,10 +1189,14 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
         float* cls_output = (float*)malloc(sizeof(float) * num_classes);
         memcpy(cls_token, enc_output, sizeof(float) * embed_dim);
 
-        linear_layer(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151]);
+
+        linear_layer_opencl(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151],
+            inputBuffer_mlp, weight1Buffer, bias1Buffer, fc1_outBuffer);
         /* 확률분포 추출 */
-        Softmax(cls_output, probabilities[image_count], num_classes);
+        //Softmax(cls_output, probabilities[i], num_classes);
+        Softmax_opencl(cls_output, probabilities[image_count], 1, num_classes);
         clFinish(queue);
+
         endTime = clock();
         printf("image %d: %lf\n\n", image_count, (double)(endTime - imgStartTime) / CLOCKS_PER_SEC);
     }

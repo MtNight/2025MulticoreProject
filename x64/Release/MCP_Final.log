@@ -1,17 +1,17 @@
 ﻿  ViT_prl.c
   cl_version.h: CL_TARGET_OPENCL_VERSION is not defined. Defaulting to 300 (OpenCL 3.0)
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(261,74): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(261,74): warning C4024: 'clEnqueueNDRangeKernel': 형식 및 실제 매개 변수 5의 형식이 서로 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(261,86): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(261,86): warning C4024: 'clEnqueueNDRangeKernel': 형식 및 실제 매개 변수 6의 형식이 서로 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(287,67): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(287,67): warning C4024: 'clEnqueueNDRangeKernel': 형식 및 실제 매개 변수 5의 형식이 서로 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(301,22): warning C4244: '초기화 중': 'int'에서 'float'(으)로 변환하면서 데이터가 손실될 수 있습니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(719,91): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
-C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(719,91): warning C4024: 'clCreateProgramWithSource': 형식 및 실제 매개 변수 4의 형식이 서로 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(267,74): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(267,74): warning C4024: 'clEnqueueNDRangeKernel': 형식 및 실제 매개 변수 5의 형식이 서로 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(267,86): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(267,86): warning C4024: 'clEnqueueNDRangeKernel': 형식 및 실제 매개 변수 6의 형식이 서로 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(293,67): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(293,67): warning C4024: 'clEnqueueNDRangeKernel': 형식 및 실제 매개 변수 5의 형식이 서로 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(307,22): warning C4244: '초기화 중': 'int'에서 'float'(으)로 변환하면서 데이터가 손실될 수 있습니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(809,91): warning C4047: '함수': 'const size_t *'의 간접 참조 수준이 'size_t (*)[2]'과(와) 다릅니다.
+C:\Users\eskwo\source\repos\MCP_Final\MCP_Final\ViT_prl.c(809,91): warning C4024: 'clCreateProgramWithSource': 형식 및 실제 매개 변수 4의 형식이 서로 다릅니다.
   코드를 생성하고 있습니다.
-  3 of 33 functions ( 9.1%) were compiled, the rest were copied from previous compilation.
-    0 functions were new in current compilation
+  13 of 32 functions (40.6%) were compiled, the rest were copied from previous compilation.
+    2 functions were new in current compilation
     1 functions had inline decision re-evaluated but remain unchanged
   코드를 생성했습니다.
   MCP_Final.vcxproj -> C:\Users\eskwo\source\repos\MCP_Final\x64\Release\MCP_Final.exe
