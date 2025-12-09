@@ -157,6 +157,7 @@
     <ClInclude Include="ViT_seq.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="kernel_MLP.cl" />
     <None Include="kernel_Preprocess.cl" />
     <None Include="kernel_MHA.cl" />
   </ItemGroup>

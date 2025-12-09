@@ -58,5 +58,8 @@
     <None Include="kernel_Preprocess.cl">
       <Filter>소스 파일</Filter>
     </None>
+    <None Include="kernel_MLP.cl">
+      <Filter>소스 파일</Filter>
+    </None>
   </ItemGroup>
 </Project>
