@@ -19,7 +19,7 @@
 #define drop_path_rate 0.0
 #define eps 1e-6
 #define TILE 16
-#define NUM_IMAGE 2     //for test. 100개로 고쳐야 함
+#define NUM_IMAGE 100     //for test. 100개로 고쳐야 함
 
 #define CHECK_ERROR(err) \
     if (err != CL_SUCCESS) { \
@@ -622,7 +622,7 @@ void Softmax_opencl(cl_mem logits, float* probs, int batch, int classes)
     err = clSetKernelArg(softmax_kernel, 2, sizeof(int), &classes);
     CHECK_ERROR(err);
 
-    // 2) 커널 실행: batch 개의 work-item, 각 work-item이 한 row 처리
+    // 2) 커널 실행
     size_t gws[1] = { (size_t)batch };
     size_t lws[1] = { 1 };
 
@@ -919,7 +919,6 @@ void ReleaseOpenCLElements() {
     clReleaseMemObject(transposedOutWeightBuffer);
     clReleaseMemObject(mhaOutputBuffer);
 
-
     // MLP 커널
     clReleaseKernel(linear_kernel);
     clReleaseKernel(gelukernel);
@@ -960,8 +959,6 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
     cl_mem enc_layer[12];
     cl_mem enc_output;
     cl_mem final_output;
-
-    float* cls_output = (float*)malloc(sizeof(float) * num_classes);
 
     for (image_count = 0; image_count < image->n; image_count++) {
         clock_t imgStartTime = clock();
@@ -1011,5 +1008,4 @@ void ViT_prl(ImageData* image, Network* networks, float** probabilities) {
     }
 
     ReleaseOpenCLElements();
-    free(cls_output);
 }

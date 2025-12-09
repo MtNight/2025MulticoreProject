@@ -62,32 +62,31 @@ __kernel void residual(
 
     dst[idx] = src[idx] + add[idx];
 }
-
 __kernel void softmax_kernel(
-    __global const float* logits,  // [batch * classes]
-    __global float* probs,         // [batch * classes]
-    const int classes)
-{
+    __global const float* logits, // [batch * classes]
+    __global float* probs, // [batch * classes]
+    const int classes) 
+{ 
     int batch_id = get_global_id(0);
     int row_start = batch_id * classes;
-
-    // 1) max(logits[row])
-    float m = logits[row_start];
+    
+    // 1) max(logits[row]) 
+    float m = logits[row_start]; 
     for (int c = 1; c < classes; ++c) {
-        float v = logits[row_start + c];
-        if (v > m) m = v;
-    }
-
-    // 2) exp(logit - m) 및 합
-    float s = 0.0f;
-    for (int c = 0; c < classes; ++c) {
-        float e = exp(logits[row_start + c] - m);
-        probs[row_start + c] = e;
-        s += e;
-    }
-
-    // 3) 정규화
-    for (int c = 0; c < classes; ++c) {
-        probs[row_start + c] /= s;
-    }
+        float v = logits[row_start + c]; 
+        if (v > m) m = v; 
+    } 
+    
+    // 2) exp(logit - m) 및 합 
+    float s = 0.0f; 
+    for (int c = 0; c < classes; ++c) { 
+        float e = exp(logits[row_start + c] - m); 
+        probs[row_start + c] = e; 
+        s += e; 
+    } 
+    
+    // 3) 정규화 
+    for (int c = 0; c < classes; ++c) { 
+        probs[row_start + c] /= s; 
+    } 
 }

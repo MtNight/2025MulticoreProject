@@ -60,17 +60,12 @@ __kernel void linear_kernel(
     }
 }
 
-#define M_SQRT2PI 0.7978845608028654f  // sqrt(2/pi)
-
 __kernel void gelu_kernel_inplace(__global float* data, int N) {
     int gid = get_global_id(0);
     if (gid >= N) return;
 
     float x = data[gid];
-    // approximate GELU
-    float x3 = x * x * x;
-    float t = 0.044715f * x3 + x;
-    float y = 0.5f * x * (1.0f + tanh(M_SQRT2PI * t));
+    float y = 0.5f * x * (1.0f + erf(x / sqrt((float)2)));
     data[gid] = y;
 }
 

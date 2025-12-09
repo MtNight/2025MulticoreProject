@@ -41,7 +41,7 @@ ImageData* load_image_data(const char* filename) {
     }
 
     //int n = header[0];
-    int n = 2;
+    int n = 100;
     int c = header[1];
     int h = header[2];
     int w = header[3];
